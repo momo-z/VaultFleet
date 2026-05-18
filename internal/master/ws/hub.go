@@ -80,6 +80,7 @@ func (h *Hub) RemoveIfCurrent(agentID string, conn *SafeConn) bool {
 		h.mu.Unlock()
 		return false
 	}
+	wasOnline := status.Online
 	status.Online = false
 	delete(h.agents, agentID)
 	h.mu.Unlock()
@@ -87,7 +88,7 @@ func (h *Hub) RemoveIfCurrent(agentID string, conn *SafeConn) bool {
 	if conn != nil {
 		_ = conn.Close()
 	}
-	return true
+	return wasOnline
 }
 
 func (h *Hub) IsOnline(agentID string) bool {
@@ -113,6 +114,22 @@ func (h *Hub) MarkOffline(agentID string) bool {
 
 	status, ok := h.agents[agentID]
 	if !ok || status == nil || !status.Online {
+		return false
+	}
+
+	status.Online = false
+	return true
+}
+
+func (h *Hub) MarkOfflineIfStale(agentID string, now time.Time, threshold time.Duration) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	status, ok := h.agents[agentID]
+	if !ok || status == nil || !status.Online {
+		return false
+	}
+	if now.Sub(status.LastSeenAt) <= threshold {
 		return false
 	}
 

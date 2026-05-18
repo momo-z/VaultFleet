@@ -252,6 +252,27 @@ func TestHandler_OldConnectionCleanupDoesNotRemoveReplacementConnection(t *testi
 	}
 }
 
+func TestHandler_CleanupAfterMonitorOfflineDoesNotPublishDuplicateOffline(t *testing.T) {
+	setup := setupHandlerTest(t, validTestAuth, noPolicy)
+	conn := &SafeConn{}
+	now := time.Date(2026, 5, 18, 10, 0, 0, 0, time.UTC)
+
+	offlineEvents := subscribeOfflineEvents(setup.bus)
+	setup.hub.Add("agent-1", conn)
+	setup.hub.UpdateLastSeen("agent-1", now.Add(-2*time.Minute))
+
+	monitor := NewMonitorWithConfig(setup.hub, setup.bus, 10*time.Millisecond, time.Minute, func() time.Time {
+		return now
+	})
+	monitor.scan()
+
+	handler := NewHandler(setup.hub, setup.bus, validTestAuth, noPolicy)
+	handler.cleanupConnection("agent-1", conn)
+
+	assert.Equal(t, []string{"agent-1"}, offlineEvents.snapshot())
+	assert.NotContains(t, setup.hub.GetAllAgents(), "agent-1")
+}
+
 func TestHandler_OnlinePublishPanicStillCleansRegistration(t *testing.T) {
 	bus := events.NewBus()
 	bus.Subscribe(events.AgentOnline, func(events.Event) {

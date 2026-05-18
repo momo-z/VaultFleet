@@ -70,6 +70,28 @@ func TestHub_MarkOnlineAndMarkOffline(t *testing.T) {
 	assert.False(t, hub.MarkOnline("missing-agent"))
 }
 
+func TestHub_MarkOfflineIfStaleRechecksCurrentLastSeen(t *testing.T) {
+	hub := NewHub()
+	now := time.Date(2026, 5, 18, 10, 0, 0, 0, time.UTC)
+
+	hub.Add("agent-1", &SafeConn{})
+	hub.UpdateLastSeen("agent-1", now.Add(-2*time.Minute))
+
+	snapshot := hub.GetAllAgents()["agent-1"]
+	require.NotNil(t, snapshot)
+	require.True(t, now.Sub(snapshot.LastSeenAt) > time.Minute)
+
+	hub.UpdateLastSeen("agent-1", now)
+
+	assert.False(t, hub.MarkOfflineIfStale("agent-1", now, time.Minute))
+	assert.True(t, hub.IsOnline("agent-1"))
+
+	hub.UpdateLastSeen("agent-1", now.Add(-2*time.Minute))
+	assert.True(t, hub.MarkOfflineIfStale("agent-1", now, time.Minute))
+	assert.False(t, hub.IsOnline("agent-1"))
+	assert.False(t, hub.MarkOfflineIfStale("agent-1", now, time.Minute))
+}
+
 func TestHub_GetAllAgents(t *testing.T) {
 	hub := NewHub()
 	firstConn := &SafeConn{}

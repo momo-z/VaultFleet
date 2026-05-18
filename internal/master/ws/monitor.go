@@ -64,7 +64,7 @@ func (m *Monitor) scan() {
 		if now.Sub(status.LastSeenAt) <= m.threshold {
 			continue
 		}
-		if !m.hub.MarkOffline(agentID) {
+		if !m.hub.MarkOfflineIfStale(agentID, now, m.threshold) {
 			continue
 		}
 
