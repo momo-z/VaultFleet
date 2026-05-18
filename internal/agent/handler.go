@@ -613,6 +613,7 @@ func (h *Handler) handleRestoreReq(msg protocol.Message) {
 		agentID = h.agentID
 	}
 
+	h.sendRestoreProgress(msg.ID, agentID, req.SnapshotID)
 	err = h.restoreRunner(context.Background(), executorConfigForPolicy(h.configDir, policyPayload), req.SnapshotID, req.Target)
 	finishedAt := time.Now()
 	result := protocol.TaskResultPayload{
@@ -629,6 +630,23 @@ func (h *Handler) handleRestoreReq(msg protocol.Message) {
 		result.ErrorLog = err.Error()
 	}
 	h.sendTaskResult(result)
+}
+
+func (h *Handler) sendRestoreProgress(messageID string, agentID string, snapshotID string) {
+	payload := protocol.RestoreProgressPayload{
+		AgentID:    agentID,
+		SnapshotID: snapshotID,
+		Percent:    0,
+	}
+	msg, err := protocol.NewMessage(protocol.TypeRestoreProgress, payload)
+	if err != nil {
+		log.Printf("create restore progress failed: %v", err)
+		return
+	}
+	msg.ID = messageID
+	if err := h.sendMessage(*msg); err != nil {
+		log.Printf("send restore progress failed: %v", err)
+	}
 }
 
 func (h *Handler) handleSnapshotListReq(msg protocol.Message) {
