@@ -578,6 +578,25 @@ func TestEnrollAgent_TokenConsumedAfterUse(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, second.Code)
 }
 
+func TestEnrollAgent_AlreadyEnrolledTokenReturnsConflict(t *testing.T) {
+	setup := setupTestAgents(t)
+	require.NoError(t, setup.database.DB.Create(&db.Agent{
+		Name:        "Tokyo-1",
+		EnrollToken: "ek_used",
+		AgentToken:  "ak_existing",
+		Status:      "offline",
+	}).Error)
+
+	w := postJSON(t, setup.router, "/api/agent/enroll", map[string]string{
+		"enroll_token": "ek_used",
+	})
+
+	require.Equal(t, http.StatusConflict, w.Code)
+	body := parseJSON(t, w)
+	assert.Equal(t, false, body["ok"])
+	assert.Contains(t, body["error"], "already enrolled")
+}
+
 func TestEnrollAgent_RegenerateAndReEnroll(t *testing.T) {
 	setup := setupTestAgents(t)
 	created := createTestAgent(t, setup.router, "Tokyo-1")

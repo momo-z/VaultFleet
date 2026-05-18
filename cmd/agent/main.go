@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"log"
 	"os"
@@ -12,13 +11,12 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"vaultfleet/internal/agent/connect"
+	enrollpkg "vaultfleet/internal/agent/enroll"
 	"vaultfleet/internal/agent/policy"
 	"vaultfleet/pkg/protocol"
 )
 
 const defaultConfigPath = "/etc/vaultfleet/agent.yaml"
-
-var ErrNotImplemented = errors.New("enrollment not yet implemented")
 
 type AgentConfig struct {
 	Server     string `yaml:"server"`
@@ -83,5 +81,13 @@ func loadConfig(path string) (*AgentConfig, error) {
 }
 
 func enroll(server, token, configPath string) (*AgentConfig, error) {
-	return nil, ErrNotImplemented
+	cfg, err := enrollpkg.Enroll(server, token, configPath)
+	if err != nil {
+		return nil, err
+	}
+	return &AgentConfig{
+		Server:     cfg.Server,
+		AgentID:    cfg.AgentID,
+		AgentToken: cfg.AgentToken,
+	}, nil
 }

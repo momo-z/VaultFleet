@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -14,6 +15,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	agentenroll "vaultfleet/internal/agent/enroll"
+	masterapi "vaultfleet/internal/master/api"
+	"vaultfleet/internal/master/db"
 	"vaultfleet/internal/master/events"
 	"vaultfleet/pkg/protocol"
 )
@@ -322,6 +326,97 @@ func TestHandler_PolicyPushedOnConnect(t *testing.T) {
 	assert.Equal(t, policyMsg.Type, received.Type)
 	assert.Equal(t, policyMsg.ID, received.ID)
 	assert.JSONEq(t, string(policyMsg.Payload), string(received.Payload))
+}
+
+func TestHandler_FullRegistrationFlow(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	database, err := db.New(t.TempDir())
+	require.NoError(t, err)
+	agent := db.Agent{
+		Name:        "Tokyo-1",
+		EnrollToken: "ek_full_flow",
+		Status:      "offline",
+	}
+	require.NoError(t, database.DB.Create(&agent).Error)
+
+	policyMsg, err := protocol.NewMessage(protocol.TypePolicyPush, protocol.PolicyPushPayload{
+		AgentID:    agent.ID,
+		BackupDirs: []string{"/srv"},
+		Schedule:   "0 4 * * *",
+	})
+	require.NoError(t, err)
+
+	hub := NewHub()
+	bus := events.NewBus()
+	onlineEvents := make(chan events.Event, 1)
+	bus.Subscribe(events.AgentOnline, func(event events.Event) {
+		onlineEvents <- event
+	})
+
+	agentHandler := masterapi.NewAgentHandler(database)
+	wsHandler := NewHandler(
+		hub,
+		bus,
+		func(token string) (string, error) {
+			var enrolled db.Agent
+			if err := database.DB.First(&enrolled, "agent_token = ?", token).Error; err != nil {
+				return "", err
+			}
+			return enrolled.ID, nil
+		},
+		func(agentID string) (*protocol.Message, bool) {
+			if agentID != agent.ID {
+				return nil, false
+			}
+			return policyMsg, true
+		},
+	)
+	router := gin.New()
+	router.POST("/api/agent/enroll", agentHandler.Enroll)
+	router.GET("/ws/agent", wsHandler.HandleWebSocket)
+	server := httptest.NewServer(router)
+	t.Cleanup(server.Close)
+
+	cfg, err := agentenroll.Enroll(server.URL, "ek_full_flow", filepath.Join(t.TempDir(), "agent.yaml"))
+	require.NoError(t, err)
+	assert.Equal(t, agent.ID, cfg.AgentID)
+	assert.NotEmpty(t, cfg.AgentToken)
+
+	var stored db.Agent
+	require.NoError(t, database.DB.First(&stored, "id = ?", agent.ID).Error)
+	assert.Empty(t, stored.EnrollToken)
+	assert.Equal(t, cfg.AgentToken, stored.AgentToken)
+
+	conn, _, err := websocket.DefaultDialer.Dial(
+		websocketURL(server.URL, "/ws/agent", url.Values{"token": []string{cfg.AgentToken}}),
+		nil,
+	)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	var received protocol.Message
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(2*time.Second)))
+	require.NoError(t, conn.ReadJSON(&received))
+	assert.Equal(t, protocol.TypePolicyPush, received.Type)
+	assert.Equal(t, policyMsg.ID, received.ID)
+	assert.JSONEq(t, string(policyMsg.Payload), string(received.Payload))
+
+	payload, err := protocol.ParsePayload[protocol.PolicyPushPayload](&received)
+	require.NoError(t, err)
+	assert.Equal(t, agent.ID, payload.AgentID)
+
+	require.Eventually(t, func() bool {
+		return hub.IsOnline(agent.ID)
+	}, time.Second, 10*time.Millisecond)
+
+	select {
+	case event := <-onlineEvents:
+		assert.Equal(t, events.AgentOnline, event.Type)
+		assert.Equal(t, agent.ID, event.Payload)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for agent online event")
+	}
 }
 
 func TestHandler_PublishesAgentOnlineAndOfflineEvents(t *testing.T) {
