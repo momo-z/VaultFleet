@@ -60,7 +60,7 @@ func TestCreateNotificationConfig(t *testing.T) {
 	assert.Equal(t, "webhook", body["type"])
 	assertJSONList(t, body["events"], []string{"backup_failed", "agent_offline"})
 	config := requireMap(t, body["config"])
-	assert.Equal(t, "https://hooks.example.test/notify", config["url"])
+	assert.Equal(t, redactedSecretValue, config["url"])
 	headers := requireMap(t, config["headers"])
 	assert.Equal(t, redactedSecretValue, headers["Authorization"])
 	assert.Equal(t, "trace-id", headers["X-Trace"])
@@ -160,6 +160,22 @@ func TestCreateNotificationConfigValidatesTypeAndRequiredConfig(t *testing.T) {
 			},
 		},
 		{
+			name: "webhook invalid header name",
+			body: map[string]any{
+				"type":   "webhook",
+				"config": map[string]any{"url": "https://hooks.example.test", "headers": map[string]any{"bad header": "value"}},
+				"events": []string{"agent_offline"},
+			},
+		},
+		{
+			name: "webhook crlf header value",
+			body: map[string]any{
+				"type":   "webhook",
+				"config": map[string]any{"url": "https://hooks.example.test", "headers": map[string]any{"X-Test": "bad\r\nvalue"}},
+				"events": []string{"agent_offline"},
+			},
+		},
+		{
 			name: "events missing",
 			body: map[string]any{
 				"type":   "webhook",
@@ -202,6 +218,8 @@ func TestListAndGetNotificationConfigsReturnEventArrays(t *testing.T) {
 	}
 	assertJSONList(t, seen[first["id"].(string)]["events"], []string{"backup_failed"})
 	assertJSONList(t, seen[second["id"].(string)]["events"], []string{"agent_offline"})
+	firstListConfig := requireMap(t, seen[first["id"].(string)]["config"])
+	assert.Equal(t, redactedSecretValue, firstListConfig["url"])
 	secondConfig := requireMap(t, seen[second["id"].(string)]["config"])
 	assert.Equal(t, redactedSecretValue, secondConfig["bot_token"])
 	assert.Equal(t, "chat", secondConfig["chat_id"])
@@ -212,6 +230,8 @@ func TestListAndGetNotificationConfigsReturnEventArrays(t *testing.T) {
 	assert.Equal(t, first["id"], body["id"])
 	assert.Equal(t, "webhook", body["type"])
 	assertJSONList(t, body["events"], []string{"backup_failed"})
+	firstConfig := requireMap(t, body["config"])
+	assert.Equal(t, redactedSecretValue, firstConfig["url"])
 
 	w = getJSON(t, setup.router, "/api/notifications/"+second["id"].(string))
 	require.Equal(t, http.StatusOK, w.Code)
@@ -281,7 +301,7 @@ func TestUpdateNotificationConfigCanUpdateOnlyEvents(t *testing.T) {
 	assert.Equal(t, "webhook", body["type"])
 	assertJSONList(t, body["events"], []string{"backup_failed", "agent_offline"})
 	config := requireMap(t, body["config"])
-	assert.Equal(t, "https://hooks.example.test", config["url"])
+	assert.Equal(t, redactedSecretValue, config["url"])
 	headers := requireMap(t, config["headers"])
 	assert.Equal(t, redactedSecretValue, headers["Authorization"])
 	assert.Equal(t, "trace-id", headers["X-Trace"])
@@ -319,6 +339,44 @@ func TestUpdateNotificationConfigPreservesRedactedSecrets(t *testing.T) {
 	plaintext, err := db.Decrypt(stored.Config, setup.database.MasterKey)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"bot_token":"old-token","chat_id":"chat-2"}`, plaintext)
+}
+
+func TestUpdateWebhookNotificationConfigPreservesRedactedURLAndSecrets(t *testing.T) {
+	setup := setupNotificationAPI(t)
+	created := createNotificationConfigViaAPI(t, setup.router, "webhook", map[string]any{
+		"url": "https://hooks.example.test/secret-path?token=abc123",
+		"headers": map[string]any{
+			"Authorization": "Bearer old-secret",
+			"X-Trace":       "old-trace",
+		},
+	}, []string{"backup_failed"})
+	id := created["id"].(string)
+
+	w := putJSON(t, setup.router, "/api/notifications/"+id, map[string]any{
+		"config": map[string]any{
+			"url": redactedSecretValue,
+			"headers": map[string]any{
+				"Authorization": redactedSecretValue,
+				"X-Trace":       "new-trace",
+			},
+		},
+		"events": []string{"agent_offline"},
+	})
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	body := parseJSON(t, w)
+	config := requireMap(t, body["config"])
+	assert.Equal(t, redactedSecretValue, config["url"])
+	headers := requireMap(t, config["headers"])
+	assert.Equal(t, redactedSecretValue, headers["Authorization"])
+	assert.Equal(t, "new-trace", headers["X-Trace"])
+	assertJSONList(t, body["events"], []string{"agent_offline"})
+
+	var stored db.NotificationConfig
+	require.NoError(t, setup.database.DB.First(&stored, "id = ?", id).Error)
+	plaintext, err := db.Decrypt(stored.Config, setup.database.MasterKey)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"url":"https://hooks.example.test/secret-path?token=abc123","headers":{"Authorization":"Bearer old-secret","X-Trace":"new-trace"}}`, plaintext)
 }
 
 func TestUpdateNotificationConfigValidationAndNotFound(t *testing.T) {
@@ -364,13 +422,13 @@ func TestDeleteNotificationConfigNotFound(t *testing.T) {
 func TestTestNotificationConfigSendsSampleNotification(t *testing.T) {
 	setup := setupNotificationAPI(t)
 	created := createNotificationConfigViaAPI(t, setup.router, "webhook", map[string]any{
-		"url":     "https://hooks.example.test",
+		"url":     "https://hooks.example.test/secret-path?token=abc123",
 		"headers": map[string]any{"Authorization": "Bearer secret"},
 	}, []string{"backup_failed"})
 	recorder := &apiRecordingNotifier{}
 	setup.handler.notifierFactory = func(notificationType string, raw json.RawMessage) (notify.Notifier, error) {
 		assert.Equal(t, "webhook", notificationType)
-		assert.JSONEq(t, `{"url":"https://hooks.example.test","headers":{"Authorization":"Bearer secret"}}`, string(raw))
+		assert.JSONEq(t, `{"url":"https://hooks.example.test/secret-path?token=abc123","headers":{"Authorization":"Bearer secret"}}`, string(raw))
 		return recorder, nil
 	}
 

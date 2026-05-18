@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -104,8 +106,7 @@ func TestDispatcherSendsAgentOfflineNotificationsForMatchingConfigs(t *testing.T
 	dispatcher.Start()
 	bus.Publish(events.Event{Type: events.AgentOffline, Payload: "agent-1"})
 
-	require.Len(t, notifier.sent, 1)
-	msg := notifier.sent[0]
+	msg := requireRecordedMessage(t, notifier)
 	assert.Equal(t, "Agent Offline", msg.Title)
 	assert.Equal(t, LevelWarning, msg.Level)
 	assert.Equal(t, "agent-1", msg.AgentName)
@@ -138,8 +139,7 @@ func TestDispatcherDerivesBackupFailedFromFailedBackupTaskResult(t *testing.T) {
 		},
 	})
 
-	require.Len(t, notifier.sent, 1)
-	msg := notifier.sent[0]
+	msg := requireRecordedMessage(t, notifier)
 	assert.Equal(t, "Backup Failed", msg.Title)
 	assert.Equal(t, LevelError, msg.Level)
 	assert.Equal(t, "agent-from-result", msg.AgentName)
@@ -165,8 +165,7 @@ func TestDispatcherSendsDirectBackupFailedEventOnlyToMatchingConfigs(t *testing.
 		},
 	})
 
-	require.Len(t, notifier.sent, 1)
-	msg := notifier.sent[0]
+	msg := requireRecordedMessage(t, notifier)
 	assert.Equal(t, "Backup Failed", msg.Title)
 	assert.Equal(t, LevelError, msg.Level)
 	assert.Equal(t, "Tokyo-1", msg.AgentName)
@@ -187,7 +186,7 @@ func TestDispatcherIgnoresSuccessfulOrNonBackupTaskResults(t *testing.T) {
 	publishTaskResult(t, bus, protocol.TaskResultPayload{AgentID: "agent-1", TaskType: "backup", Status: "success"})
 	publishTaskResult(t, bus, protocol.TaskResultPayload{AgentID: "agent-1", TaskType: "restore", Status: "failed", ErrorLog: "restore failed"})
 
-	assert.Empty(t, notifier.sent)
+	assert.Empty(t, notifier.snapshot())
 }
 
 func TestDispatcherSkipsNonMatchingConfigsAndContinuesAfterSendError(t *testing.T) {
@@ -195,10 +194,9 @@ func TestDispatcherSkipsNonMatchingConfigsAndContinuesAfterSendError(t *testing.
 	bus := events.NewBus()
 	failing := &recordingNotifier{err: errors.New("send failed")}
 	successful := &recordingNotifier{}
-	calls := 0
+	var calls atomic.Int64
 	dispatcher := NewDispatcher(database, bus, WithNotifierFactory(func(string, json.RawMessage) (Notifier, error) {
-		calls++
-		if calls == 1 {
+		if calls.Add(1) == 1 {
 			return failing, nil
 		}
 		return successful, nil
@@ -210,9 +208,60 @@ func TestDispatcherSkipsNonMatchingConfigsAndContinuesAfterSendError(t *testing.
 	dispatcher.Start()
 	bus.Publish(events.Event{Type: events.AgentOffline, Payload: "agent-1"})
 
-	assert.Len(t, failing.sent, 1)
-	assert.Len(t, successful.sent, 1)
-	assert.Equal(t, 2, calls)
+	require.Eventually(t, func() bool {
+		return len(failing.snapshot()) == 1 && len(successful.snapshot()) == 1
+	}, time.Second, 10*time.Millisecond)
+	assert.Equal(t, int64(2), calls.Load())
+}
+
+func TestDispatcherDoesNotBlockEventPublishWhenNotifierBlocks(t *testing.T) {
+	database := setupNotifyTestDB(t)
+	bus := events.NewBus()
+	blocking := &blockingNotifier{started: make(chan struct{}), release: make(chan struct{})}
+	dispatcher := NewDispatcher(database, bus, WithNotifierFactory(func(string, json.RawMessage) (Notifier, error) {
+		return blocking, nil
+	}))
+	createNotifyConfig(t, database, "webhook", `{"url":"https://blocking.example.test"}`, []string{"agent_offline"})
+
+	dispatcher.Start()
+	started := time.Now()
+	bus.Publish(events.Event{Type: events.AgentOffline, Payload: "agent-1"})
+	elapsed := time.Since(started)
+	defer close(blocking.release)
+
+	assert.Less(t, elapsed, 50*time.Millisecond)
+	select {
+	case <-blocking.started:
+	case <-time.After(time.Second):
+		t.Fatal("notification send did not start")
+	}
+}
+
+func TestDispatcherSlowNotifierDoesNotPreventLaterMatchingConfig(t *testing.T) {
+	database := setupNotifyTestDB(t)
+	bus := events.NewBus()
+	blocking := &blockingNotifier{started: make(chan struct{}), release: make(chan struct{})}
+	successful := &recordingNotifier{}
+	var calls atomic.Int64
+	dispatcher := NewDispatcher(database, bus, WithNotifierFactory(func(string, json.RawMessage) (Notifier, error) {
+		if calls.Add(1) == 1 {
+			return blocking, nil
+		}
+		return successful, nil
+	}))
+	createNotifyConfig(t, database, "webhook", `{"url":"https://blocking.example.test"}`, []string{"agent_offline"})
+	createNotifyConfig(t, database, "webhook", `{"url":"https://successful.example.test"}`, []string{"agent_offline"})
+
+	dispatcher.Start()
+	bus.Publish(events.Event{Type: events.AgentOffline, Payload: "agent-1"})
+	defer close(blocking.release)
+
+	select {
+	case <-blocking.started:
+	case <-time.After(time.Second):
+		t.Fatal("blocking notification send did not start")
+	}
+	requireRecordedMessage(t, successful)
 }
 
 func TestDispatcherDecryptsStoredNotificationConfigAndUsesTimeoutContext(t *testing.T) {
@@ -232,9 +281,12 @@ func TestDispatcherDecryptsStoredNotificationConfigAndUsesTimeoutContext(t *test
 	dispatcher.Start()
 	bus.Publish(events.Event{Type: events.AgentOffline, Payload: "agent-1"})
 
-	require.Len(t, notifier.sent, 1)
-	assert.True(t, notifier.hadDeadline, "dispatcher should bound external notification sends")
-	assert.LessOrEqual(t, time.Until(notifier.deadline), defaultSendTimeout)
+	require.Eventually(t, func() bool {
+		return len(notifier.snapshot()) == 1
+	}, time.Second, 10*time.Millisecond)
+	hadDeadline, deadline := notifier.deadlineSnapshot()
+	assert.True(t, hadDeadline, "dispatcher should bound external notification sends")
+	assert.LessOrEqual(t, time.Until(deadline), defaultSendTimeout)
 }
 
 func publishTaskResult(t *testing.T, bus *events.Bus, result protocol.TaskResultPayload) {
@@ -275,11 +327,14 @@ func createNotifyConfig(t *testing.T, database *db.Database, notificationType, c
 }
 
 type recordingNotifier struct {
+	mu   sync.Mutex
 	sent []NotifyMessage
 	err  error
 }
 
 func (n *recordingNotifier) Send(_ context.Context, msg NotifyMessage) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
 	n.sent = append(n.sent, msg)
 	return n.err
 }
@@ -288,13 +343,33 @@ func (n *recordingNotifier) Type() string {
 	return "recording"
 }
 
+func (n *recordingNotifier) snapshot() []NotifyMessage {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return append([]NotifyMessage(nil), n.sent...)
+}
+
+func requireRecordedMessage(t *testing.T, notifier *recordingNotifier) NotifyMessage {
+	t.Helper()
+
+	var messages []NotifyMessage
+	require.Eventually(t, func() bool {
+		messages = notifier.snapshot()
+		return len(messages) == 1
+	}, time.Second, 10*time.Millisecond)
+	return messages[0]
+}
+
 type contextRecordingNotifier struct {
+	mu          sync.Mutex
 	sent        []NotifyMessage
 	hadDeadline bool
 	deadline    time.Time
 }
 
 func (n *contextRecordingNotifier) Send(ctx context.Context, msg NotifyMessage) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
 	n.sent = append(n.sent, msg)
 	n.deadline, n.hadDeadline = ctx.Deadline()
 	return nil
@@ -302,4 +377,38 @@ func (n *contextRecordingNotifier) Send(ctx context.Context, msg NotifyMessage) 
 
 func (n *contextRecordingNotifier) Type() string {
 	return "recording"
+}
+
+func (n *contextRecordingNotifier) snapshot() []NotifyMessage {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return append([]NotifyMessage(nil), n.sent...)
+}
+
+func (n *contextRecordingNotifier) deadlineSnapshot() (bool, time.Time) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.hadDeadline, n.deadline
+}
+
+type blockingNotifier struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (n *blockingNotifier) Send(ctx context.Context, msg NotifyMessage) error {
+	n.once.Do(func() {
+		close(n.started)
+	})
+	select {
+	case <-n.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (n *blockingNotifier) Type() string {
+	return "blocking"
 }

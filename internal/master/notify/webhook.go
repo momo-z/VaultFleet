@@ -52,7 +52,7 @@ func (n *WebhookNotifier) Send(ctx context.Context, msg NotifyMessage) error {
 
 	resp, err := n.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("send webhook message: %w", err)
+		return sanitizedSendError{op: "send webhook message", err: err}
 	}
 	defer resp.Body.Close()
 
@@ -71,7 +71,7 @@ func (n *WebhookNotifier) Type() string {
 func validateWebhookURL(rawURL string) error {
 	parsed, err := url.ParseRequestURI(rawURL)
 	if err != nil {
-		return fmt.Errorf("invalid webhook url: %w", err)
+		return fmt.Errorf("invalid webhook url")
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" {
 		return fmt.Errorf("webhook url must use http or https")
@@ -80,4 +80,33 @@ func validateWebhookURL(rawURL string) error {
 		return fmt.Errorf("webhook url host is required")
 	}
 	return nil
+}
+
+func validateWebhookHeaders(headers map[string]string) error {
+	for key, value := range headers {
+		if !isValidHTTPHeaderName(key) {
+			return fmt.Errorf("invalid webhook header name %q", key)
+		}
+		if strings.ContainsAny(value, "\r\n") {
+			return fmt.Errorf("invalid webhook header value for %q", key)
+		}
+	}
+	return nil
+}
+
+func isValidHTTPHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for _, ch := range name {
+		switch {
+		case ch >= 'a' && ch <= 'z':
+		case ch >= 'A' && ch <= 'Z':
+		case ch >= '0' && ch <= '9':
+		case strings.ContainsRune("!#$%&'*+-.^_`|~", ch):
+		default:
+			return false
+		}
+	}
+	return true
 }

@@ -62,7 +62,7 @@ func (n *TelegramNotifier) Send(ctx context.Context, msg NotifyMessage) error {
 
 	resp, err := n.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("send telegram message: %w", err)
+		return sanitizedSendError{op: "send telegram message", err: err}
 	}
 	defer resp.Body.Close()
 

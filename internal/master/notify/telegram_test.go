@@ -131,6 +131,21 @@ func TestTelegramNotifierSendReturnsNetworkOrContextError(t *testing.T) {
 	assert.ErrorIs(t, err, context.Canceled)
 }
 
+func TestTelegramNotifierSendErrorDoesNotLeakBotTokenOrURL(t *testing.T) {
+	tg := NewTelegramNotifier(TelegramConfig{
+		BotToken: "secret-telegram-token",
+		ChatID:   "chat",
+		BaseURL:  "http://127.0.0.1:1",
+	})
+
+	err := tg.Send(context.Background(), NotifyMessage{Title: "Test", Timestamp: time.Now()})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "send telegram message")
+	assert.NotContains(t, err.Error(), "secret-telegram-token")
+	assert.NotContains(t, err.Error(), "/botsecret-telegram-token/sendMessage")
+}
+
 func TestTelegramNotifierTypeAndDefaultBaseURL(t *testing.T) {
 	tg := NewTelegramNotifier(TelegramConfig{
 		BotToken: "token",

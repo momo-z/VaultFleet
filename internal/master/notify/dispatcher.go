@@ -72,12 +72,11 @@ func (d *Dispatcher) handleEvent(event events.Event) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), defaultSendTimeout)
-	defer cancel()
-
-	if err := d.dispatch(ctx, eventName, msg); err != nil {
-		log.Printf("dispatch notification %s failed: %v", eventName, err)
-	}
+	go func() {
+		if err := d.dispatch(context.Background(), eventName, msg); err != nil {
+			log.Printf("dispatch notification %s failed: %v", eventName, err)
+		}
+	}()
 }
 
 func (d *Dispatcher) dispatch(ctx context.Context, eventName string, msg NotifyMessage) error {
@@ -107,12 +106,19 @@ func (d *Dispatcher) dispatch(ctx context.Context, eventName string, msg NotifyM
 			errs = append(errs, fmt.Errorf("create %s notifier %s: %w", config.Type, config.ID, err))
 			continue
 		}
-		if err := notifier.Send(ctx, msg); err != nil {
-			errs = append(errs, fmt.Errorf("send %s notification %s: %w", notifier.Type(), config.ID, err))
-		}
+		go d.send(ctx, notifier, config.ID, msg)
 	}
 
 	return errors.Join(errs...)
+}
+
+func (d *Dispatcher) send(parent context.Context, notifier Notifier, configID string, msg NotifyMessage) {
+	ctx, cancel := context.WithTimeout(parent, defaultSendTimeout)
+	defer cancel()
+
+	if err := notifier.Send(ctx, msg); err != nil {
+		log.Printf("send %s notification %s failed: %v", notifier.Type(), configID, err)
+	}
 }
 
 func (d *Dispatcher) notificationForEvent(event events.Event) (NotifyMessage, string, bool) {
@@ -207,6 +213,11 @@ func NewNotifierFromConfig(notificationType string, raw json.RawMessage) (Notifi
 		if strings.TrimSpace(config.ChatID) == "" {
 			return nil, errors.New("telegram chat_id is required")
 		}
+		if strings.TrimSpace(config.BaseURL) != "" {
+			if err := validateWebhookURL(config.BaseURL); err != nil {
+				return nil, fmt.Errorf("telegram base_url: %w", err)
+			}
+		}
 		return NewTelegramNotifier(config), nil
 	case "webhook":
 		var config WebhookConfig
@@ -217,6 +228,9 @@ func NewNotifierFromConfig(notificationType string, raw json.RawMessage) (Notifi
 			return nil, errors.New("webhook url is required")
 		}
 		if err := validateWebhookURL(config.URL); err != nil {
+			return nil, err
+		}
+		if err := validateWebhookHeaders(config.Headers); err != nil {
 			return nil, err
 		}
 		return NewWebhookNotifier(config), nil

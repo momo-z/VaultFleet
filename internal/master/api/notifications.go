@@ -418,6 +418,9 @@ func redactNotificationConfig(notificationType string, config map[string]any) ma
 			redacted["bot_token"] = redactedSecretValue
 		}
 	case "webhook":
+		if _, ok := redacted["url"]; ok {
+			redacted["url"] = redactedSecretValue
+		}
 		headers, ok := redacted["headers"].(map[string]any)
 		if !ok {
 			return redacted
@@ -450,6 +453,11 @@ func preserveNotificationRedactedSecrets(notificationType string, currentJSON st
 			}
 		}
 	case "webhook":
+		if merged["url"] == redactedSecretValue {
+			if currentValue, ok := currentConfig["url"]; ok {
+				merged["url"] = currentValue
+			}
+		}
 		currentHeaders, _ := currentConfig["headers"].(map[string]any)
 		nextHeaders, _ := merged["headers"].(map[string]any)
 		for key, value := range nextHeaders {

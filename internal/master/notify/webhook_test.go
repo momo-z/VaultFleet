@@ -74,7 +74,7 @@ func TestWebhookNotifierSendReturnsNon2xxErrorWithResponseText(t *testing.T) {
 }
 
 func TestWebhookNotifierSendReturnsContextError(t *testing.T) {
-	wh := NewWebhookNotifier(WebhookConfig{URL: "http://127.0.0.1:1"})
+	wh := NewWebhookNotifier(WebhookConfig{URL: "https://hooks.example.test/secret-token?sig=abc123"})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -82,6 +82,22 @@ func TestWebhookNotifierSendReturnsContextError(t *testing.T) {
 
 	require.Error(t, err)
 	assert.ErrorIs(t, err, context.Canceled)
+	assert.Contains(t, err.Error(), "send webhook message")
+	assert.NotContains(t, err.Error(), "secret-token")
+	assert.NotContains(t, err.Error(), "sig=abc123")
+	assert.NotContains(t, err.Error(), "hooks.example.test")
+}
+
+func TestWebhookNotifierSendErrorDoesNotLeakSecretURL(t *testing.T) {
+	wh := NewWebhookNotifier(WebhookConfig{URL: "http://127.0.0.1:1/secret-path?token=abc123"})
+
+	err := wh.Send(context.Background(), NotifyMessage{Title: "Test", Timestamp: time.Now()})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "send webhook message")
+	assert.NotContains(t, err.Error(), "secret-path")
+	assert.NotContains(t, err.Error(), "token=abc123")
+	assert.NotContains(t, err.Error(), "127.0.0.1:1")
 }
 
 func TestWebhookNotifierType(t *testing.T) {
