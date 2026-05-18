@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -66,6 +68,20 @@ func postJSON(t *testing.T, router http.Handler, path string, body map[string]st
 	return w
 }
 
+func postJSONNoT(router http.Handler, path string, body map[string]string) (*httptest.ResponseRecorder, error) {
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	return w, nil
+}
+
 func parseJSON(t *testing.T, w *httptest.ResponseRecorder) map[string]any {
 	t.Helper()
 
@@ -84,6 +100,49 @@ func getSessionCookie(t *testing.T, w *httptest.ResponseRecorder) *http.Cookie {
 	}
 	t.Fatalf("session cookie not found in response cookies: %v", w.Result().Cookies())
 	return nil
+}
+
+func assertSessionCookieAttributes(t *testing.T, w *httptest.ResponseRecorder, cookie *http.Cookie) {
+	t.Helper()
+
+	assert.Equal(t, "session", cookie.Name)
+	assert.True(t, strings.HasPrefix(cookie.Value, "ss_"))
+	assert.False(t, cookie.Secure)
+
+	setCookie := w.Header().Get("Set-Cookie")
+	assert.Contains(t, setCookie, "Path=/")
+	assert.Contains(t, setCookie, "Max-Age=604800")
+	assert.Contains(t, setCookie, "HttpOnly")
+	assert.Contains(t, setCookie, "SameSite=Lax")
+	assert.NotContains(t, setCookie, "Secure")
+}
+
+func TestSessionCookie_SecureWhenForwardedProtoHTTPS(t *testing.T) {
+	setup := setupTestAuth(t)
+
+	reqBody, err := json.Marshal(map[string]string{
+		"username": "admin",
+		"password": "secret123",
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/init", bytes.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	w := httptest.NewRecorder()
+	setup.router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	cookie := getSessionCookie(t, w)
+	assert.Equal(t, "session", cookie.Name)
+	assert.True(t, strings.HasPrefix(cookie.Value, "ss_"))
+
+	setCookie := w.Header().Get("Set-Cookie")
+	assert.Contains(t, setCookie, "Path=/")
+	assert.Contains(t, setCookie, "Max-Age=604800")
+	assert.Contains(t, setCookie, "HttpOnly")
+	assert.Contains(t, setCookie, "SameSite=Lax")
+	assert.Contains(t, setCookie, "Secure")
 }
 
 func initAdmin(t *testing.T, router http.Handler) *httptest.ResponseRecorder {
@@ -132,9 +191,7 @@ func TestInitSetup(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, w.Code)
 	cookie := getSessionCookie(t, w)
-	assert.True(t, cookie.HttpOnly)
-	assert.Equal(t, "session", cookie.Name)
-	assert.True(t, strings.HasPrefix(cookie.Value, "ss_"))
+	assertSessionCookieAttributes(t, w, cookie)
 
 	body := parseJSON(t, w)
 	assert.Equal(t, true, body["ok"])
@@ -164,6 +221,64 @@ func TestInitSetup_BlockedAfterFirstUser(t *testing.T) {
 	assert.Equal(t, "system already initialized", body["error"])
 }
 
+func TestInitSetup_ConcurrentFirstAdminAtomic(t *testing.T) {
+	setup := setupTestAuth(t)
+
+	usernames := []string{"admin-one", "admin-two"}
+	start := make(chan struct{})
+	responses := make(chan *httptest.ResponseRecorder, len(usernames))
+	errs := make(chan error, len(usernames))
+	var wg sync.WaitGroup
+
+	for _, username := range usernames {
+		wg.Add(1)
+		go func(username string) {
+			defer wg.Done()
+			<-start
+			w, err := postJSONNoT(setup.router, "/api/auth/init", map[string]string{
+				"username": username,
+				"password": "secret123",
+			})
+			if err != nil {
+				errs <- err
+				return
+			}
+			responses <- w
+		}(username)
+	}
+
+	close(start)
+	wg.Wait()
+	close(responses)
+	close(errs)
+
+	for err := range errs {
+		require.NoError(t, err)
+	}
+
+	successes := 0
+	blocked := 0
+	for w := range responses {
+		switch w.Code {
+		case http.StatusOK:
+			successes++
+		case http.StatusBadRequest:
+			body := parseJSON(t, w)
+			assert.Equal(t, "system already initialized", body["error"])
+			blocked++
+		default:
+			t.Fatalf("unexpected status %d with body %s", w.Code, w.Body.String())
+		}
+	}
+
+	assert.Equal(t, 1, successes)
+	assert.Equal(t, 1, blocked)
+
+	var count int64
+	require.NoError(t, setup.database.DB.Model(&db.User{}).Count(&count).Error)
+	assert.Equal(t, int64(1), count)
+}
+
 func TestInitSetup_PasswordTooShort(t *testing.T) {
 	setup := setupTestAuth(t)
 
@@ -188,8 +303,7 @@ func TestLogin(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, w.Code)
 	cookie := getSessionCookie(t, w)
-	assert.True(t, cookie.HttpOnly)
-	assert.True(t, strings.HasPrefix(cookie.Value, "ss_"))
+	assertSessionCookieAttributes(t, w, cookie)
 
 	body := parseJSON(t, w)
 	assert.Equal(t, true, body["ok"])
@@ -279,6 +393,32 @@ func TestRequireAuth_InvalidSession(t *testing.T) {
 	assert.Equal(t, "unauthorized", body["error"])
 }
 
+func TestRequireAuth_ExpiredSession(t *testing.T) {
+	setup := setupTestAuth(t)
+
+	user := db.User{Username: "admin", PasswordHash: "hash"}
+	require.NoError(t, setup.database.DB.Create(&user).Error)
+
+	token := setup.handler.Sessions.Create(&Session{
+		UserID:   user.ID,
+		Username: user.Username,
+		CreateAt: time.Now().Add(-(time.Duration(sessionMaxAge)*time.Second + time.Second)),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/protected", nil)
+	req.AddCookie(&http.Cookie{Name: "session", Value: token})
+	w := httptest.NewRecorder()
+	setup.router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	body := parseJSON(t, w)
+	assert.Equal(t, false, body["ok"])
+	assert.Equal(t, "unauthorized", body["error"])
+
+	_, ok := setup.handler.Sessions.Get(token)
+	assert.False(t, ok)
+}
+
 func TestRequireInit_NoUsers(t *testing.T) {
 	setup := setupTestAuth(t)
 
@@ -304,7 +444,40 @@ func TestSessionStore_CreateAndGet(t *testing.T) {
 	assert.True(t, strings.HasPrefix(token, "ss_"))
 	got, ok := store.Get(token)
 	require.True(t, ok)
-	assert.Equal(t, session, got)
+	assert.Equal(t, session.UserID, got.UserID)
+	assert.Equal(t, session.Username, got.Username)
+	assert.False(t, got.CreateAt.IsZero())
+}
+
+func TestSessionStore_GetExpiredDeletesSession(t *testing.T) {
+	store := NewSessionStore()
+	token := store.Create(&Session{
+		UserID:   "user-1",
+		Username: "admin",
+		CreateAt: time.Now().Add(-(time.Duration(sessionMaxAge)*time.Second + time.Second)),
+	})
+
+	_, ok := store.Get(token)
+	assert.False(t, ok)
+
+	_, ok = store.Get(token)
+	assert.False(t, ok)
+}
+
+func TestSessionStore_GetReturnsCopy(t *testing.T) {
+	store := NewSessionStore()
+	token := store.Create(&Session{
+		UserID:   "user-1",
+		Username: "admin",
+	})
+
+	got, ok := store.Get(token)
+	require.True(t, ok)
+	got.Username = "mutated"
+
+	got, ok = store.Get(token)
+	require.True(t, ok)
+	assert.Equal(t, "admin", got.Username)
 }
 
 func TestSessionStore_Delete(t *testing.T) {

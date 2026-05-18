@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,6 +23,10 @@ const (
 	sessionTokenPrefix = "ss_"
 	sessionMaxAge      = 7 * 24 * 60 * 60
 )
+
+var nowFunc = time.Now
+
+var sessionTTL = time.Duration(sessionMaxAge) * time.Second
 
 type Session struct {
 	UserID   string
@@ -57,22 +62,33 @@ func (s *SessionStore) createWithError(session *Session) (string, error) {
 }
 
 func (s *SessionStore) store(token string, session *Session) {
-	if session.CreateAt.IsZero() {
-		session.CreateAt = time.Now()
+	stored := *session
+	if stored.CreateAt.IsZero() {
+		stored.CreateAt = nowFunc()
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.sessions[token] = session
+	s.sessions[token] = &stored
 }
 
 func (s *SessionStore) Get(token string) (*Session, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	session, ok := s.sessions[token]
-	return session, ok
+	if !ok {
+		return nil, false
+	}
+
+	if sessionExpired(session) {
+		delete(s.sessions, token)
+		return nil, false
+	}
+
+	clone := *session
+	return &clone, true
 }
 
 func (s *SessionStore) Delete(token string) {
@@ -102,6 +118,7 @@ func generateTokenWithError(prefix string) (string, error) {
 type AuthHandler struct {
 	DB       *db.Database
 	Sessions *SessionStore
+	initMu   sync.Mutex
 }
 
 func NewAuthHandler(database *db.Database) *AuthHandler {
@@ -127,6 +144,9 @@ func (h *AuthHandler) CheckInit(c *gin.Context) {
 }
 
 func (h *AuthHandler) InitSetup(c *gin.Context) {
+	h.initMu.Lock()
+	defer h.initMu.Unlock()
+
 	count, err := h.userCount()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "database error"})
@@ -212,7 +232,18 @@ func (h *AuthHandler) createSessionCookie(c *gin.Context, user *db.User) error {
 	if err != nil {
 		return err
 	}
-	c.SetCookie(sessionCookieName, token, sessionMaxAge, "/", "", false, true)
+
+	cookie := &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    token,
+		Path:     "/",
+		MaxAge:   sessionMaxAge,
+		Expires:  nowFunc().Add(sessionTTL),
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   requestIsSecure(c.Request),
+	}
+	http.SetCookie(c.Writer, cookie)
 	return nil
 }
 
@@ -231,4 +262,22 @@ func (h *AuthHandler) userCount() (int64, error) {
 		return 0, err
 	}
 	return count, nil
+}
+
+func sessionExpired(session *Session) bool {
+	if session == nil || session.CreateAt.IsZero() {
+		return false
+	}
+
+	return nowFunc().Sub(session.CreateAt) >= sessionTTL
+}
+
+func requestIsSecure(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if r.TLS != nil {
+		return true
+	}
+	return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
