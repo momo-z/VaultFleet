@@ -93,6 +93,22 @@ func TestBrowseRejectsScanPathOutsideRoot(t *testing.T) {
 	assertNotContainsPath(t, entries, filepath.Join(outside, "outside.txt"))
 }
 
+func TestBrowseRejectsScanPathThroughSymlinkAncestorOutsideRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink permissions are not guaranteed on Windows")
+	}
+	root := t.TempDir()
+	outside := t.TempDir()
+	require.NoError(t, os.Mkdir(filepath.Join(outside, "secret"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(outside, "secret", "leak.txt"), []byte("secret"), 0644))
+	require.NoError(t, os.Symlink(outside, filepath.Join(root, "link")))
+
+	entries, err := Browse(root, filepath.Join(root, "link", "secret"), 2)
+
+	require.Error(t, err)
+	require.Empty(t, entries)
+}
+
 func TestBrowseResolvesRelativeScanPathUnderRoot(t *testing.T) {
 	root := setupBrowseTree(t)
 

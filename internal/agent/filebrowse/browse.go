@@ -143,6 +143,18 @@ func resolveScanPath(fsRoot string, scanPath string) (string, string, error) {
 	if !isWithinRoot(cleanRoot, cleanScanPath) {
 		return "", "", fmt.Errorf("scan path %q is outside root %q", cleanScanPath, cleanRoot)
 	}
+
+	evaluatedRoot, err := filepath.EvalSymlinks(cleanRoot)
+	if err != nil {
+		return "", "", err
+	}
+	evaluatedScanPath, err := filepath.EvalSymlinks(cleanScanPath)
+	if err != nil {
+		return "", "", err
+	}
+	if !isWithinRoot(evaluatedRoot, evaluatedScanPath) {
+		return "", "", fmt.Errorf("scan path %q is outside root %q", cleanScanPath, cleanRoot)
+	}
 	return cleanRoot, cleanScanPath, nil
 }
 
