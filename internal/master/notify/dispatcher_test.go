@@ -146,6 +146,34 @@ func TestDispatcherDerivesBackupFailedFromFailedBackupTaskResult(t *testing.T) {
 	assert.Contains(t, msg.Body, "repository locked")
 }
 
+func TestDispatcherSendsDirectBackupFailedEventOnlyToMatchingConfigs(t *testing.T) {
+	database := setupNotifyTestDB(t)
+	bus := events.NewBus()
+	notifier := &recordingNotifier{}
+	dispatcher := NewDispatcher(database, bus, WithNotifierFactory(func(string, json.RawMessage) (Notifier, error) {
+		return notifier, nil
+	}))
+	createNotifyConfig(t, database, "webhook", `{"url":"https://backup.example.test"}`, []string{"backup_failed"})
+	createNotifyConfig(t, database, "webhook", `{"url":"https://offline.example.test"}`, []string{"agent_offline"})
+
+	dispatcher.Start()
+	bus.Publish(events.Event{
+		Type: events.EventType(EventBackupFailed),
+		Payload: map[string]any{
+			"agent_name": "Tokyo-1",
+			"error_log":  "repository locked",
+		},
+	})
+
+	require.Len(t, notifier.sent, 1)
+	msg := notifier.sent[0]
+	assert.Equal(t, "Backup Failed", msg.Title)
+	assert.Equal(t, LevelError, msg.Level)
+	assert.Equal(t, "Tokyo-1", msg.AgentName)
+	assert.Equal(t, "repository locked", msg.Body)
+	assert.False(t, msg.Timestamp.IsZero())
+}
+
 func TestDispatcherIgnoresSuccessfulOrNonBackupTaskResults(t *testing.T) {
 	database := setupNotifyTestDB(t)
 	bus := events.NewBus()

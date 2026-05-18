@@ -63,6 +63,7 @@ func (d *Dispatcher) Start() {
 
 	d.bus.Subscribe(events.AgentOffline, d.handleEvent)
 	d.bus.Subscribe(events.TaskResult, d.handleEvent)
+	d.bus.Subscribe(events.EventType(EventBackupFailed), d.handleEvent)
 }
 
 func (d *Dispatcher) handleEvent(event events.Event) {
@@ -130,9 +131,36 @@ func (d *Dispatcher) notificationForEvent(event events.Event) (NotifyMessage, st
 		}, EventAgentOffline, true
 	case events.TaskResult:
 		return d.backupFailedMessage(event.Payload)
+	case events.EventType(EventBackupFailed):
+		return d.directBackupFailedMessage(event.Payload)
 	default:
 		return NotifyMessage{}, "", false
 	}
+}
+
+func (d *Dispatcher) directBackupFailedMessage(payload any) (NotifyMessage, string, bool) {
+	agentName := payloadAgentName(payload)
+	if agentName == "" {
+		agentName = "unknown"
+	}
+
+	body := payloadString(payload, "error", "error_log", "message")
+	if body == "" {
+		body = "Backup failed."
+	}
+
+	timestamp := payloadTimestamp(payload)
+	if timestamp.IsZero() {
+		timestamp = d.now().UTC()
+	}
+
+	return NotifyMessage{
+		Title:     "Backup Failed",
+		Body:      body,
+		Level:     LevelError,
+		AgentName: agentName,
+		Timestamp: timestamp.UTC(),
+	}, EventBackupFailed, true
 }
 
 func (d *Dispatcher) backupFailedMessage(payload any) (NotifyMessage, string, bool) {
@@ -302,6 +330,35 @@ func stringFromMap(payload map[string]any, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func payloadString(payload any, keys ...string) string {
+	if value, ok := payload.(map[string]any); ok {
+		return stringFromMap(value, keys...)
+	}
+	return ""
+}
+
+func payloadTimestamp(payload any) time.Time {
+	value, ok := payload.(map[string]any)
+	if !ok {
+		return time.Time{}
+	}
+
+	switch timestamp := value["timestamp"].(type) {
+	case time.Time:
+		return timestamp
+	case string:
+		parsed, err := time.Parse(time.RFC3339, timestamp)
+		if err == nil {
+			return parsed
+		}
+		parsed, err = time.Parse(time.RFC3339Nano, timestamp)
+		if err == nil {
+			return parsed
+		}
+	}
+	return time.Time{}
 }
 
 func isFailureStatus(status string) bool {
