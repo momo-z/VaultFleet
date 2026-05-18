@@ -25,8 +25,8 @@ func (u *User) BeforeCreate(tx *gorm.DB) error {
 type Agent struct {
 	ID          string     `gorm:"type:text;primaryKey" json:"id"`
 	Name        string     `gorm:"type:text;not null" json:"name"`
-	EnrollToken string     `gorm:"type:text" json:"enroll_token,omitempty"`
-	AgentToken  string     `gorm:"type:text" json:"-"`
+	EnrollToken string     `gorm:"type:text;uniqueIndex:idx_agents_enroll_token_nonempty,where:enroll_token <> ''" json:"enroll_token,omitempty"`
+	AgentToken  string     `gorm:"type:text;uniqueIndex:idx_agents_agent_token_nonempty,where:agent_token <> ''" json:"-"`
 	Status      string     `gorm:"type:text;default:offline" json:"status"`
 	LastSeenAt  *time.Time `json:"last_seen_at"`
 	SystemInfo  string     `gorm:"type:text" json:"system_info"`

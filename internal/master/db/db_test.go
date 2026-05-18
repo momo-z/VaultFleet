@@ -265,3 +265,37 @@ func TestAgentByEnrollToken(t *testing.T) {
 	err = database.DB.Where("enroll_token = ?", "ek_nonexistent").First(&Agent{}).Error
 	assert.Error(t, err)
 }
+
+func TestAgentEnrollTokenUniqueWhenNonEmpty(t *testing.T) {
+	database := setupTestDB(t)
+
+	first := Agent{Name: "Tokyo-1", EnrollToken: "ek_duplicate", Status: "offline"}
+	require.NoError(t, database.DB.Create(&first).Error)
+
+	duplicate := Agent{Name: "Tokyo-2", EnrollToken: "ek_duplicate", Status: "offline"}
+	err := database.DB.Create(&duplicate).Error
+
+	require.Error(t, err)
+}
+
+func TestAgentAgentTokenUniqueWhenNonEmpty(t *testing.T) {
+	database := setupTestDB(t)
+
+	first := Agent{Name: "Tokyo-1", AgentToken: "ak_duplicate", Status: "online"}
+	require.NoError(t, database.DB.Create(&first).Error)
+
+	duplicate := Agent{Name: "Tokyo-2", AgentToken: "ak_duplicate", Status: "online"}
+	err := database.DB.Create(&duplicate).Error
+
+	require.Error(t, err)
+}
+
+func TestAgentEmptyConsumedTokensAreNotUnique(t *testing.T) {
+	database := setupTestDB(t)
+
+	first := Agent{Name: "Tokyo-1", EnrollToken: "", AgentToken: "", Status: "offline"}
+	require.NoError(t, database.DB.Create(&first).Error)
+
+	second := Agent{Name: "Tokyo-2", EnrollToken: "", AgentToken: "", Status: "offline"}
+	require.NoError(t, database.DB.Create(&second).Error)
+}

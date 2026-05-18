@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -43,6 +44,58 @@ func TestInitMasterKey_InvalidSize(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid master.key")
+}
+
+func TestInitMasterKey_RepairsExistingFilePermissions(t *testing.T) {
+	dir := t.TempDir()
+	key := testKey(0)
+	keyPath := filepath.Join(dir, "master.key")
+	require.NoError(t, os.WriteFile(keyPath, key, 0644))
+
+	loaded, err := InitMasterKey(dir)
+
+	require.NoError(t, err)
+	assert.Equal(t, key, loaded)
+
+	info, err := os.Stat(keyPath)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0600), info.Mode().Perm())
+}
+
+func TestInitMasterKey_ConcurrentCallsReturnPersistedKey(t *testing.T) {
+	dir := t.TempDir()
+
+	const callers = 16
+	keys := make([][]byte, callers)
+	errs := make([]error, callers)
+
+	var start sync.WaitGroup
+	start.Add(1)
+
+	var done sync.WaitGroup
+	done.Add(callers)
+	for i := 0; i < callers; i++ {
+		go func(i int) {
+			defer done.Done()
+			start.Wait()
+			keys[i], errs[i] = InitMasterKey(dir)
+		}(i)
+	}
+
+	start.Done()
+	done.Wait()
+
+	for _, err := range errs {
+		require.NoError(t, err)
+	}
+
+	persisted, err := os.ReadFile(filepath.Join(dir, "master.key"))
+	require.NoError(t, err)
+	require.Len(t, persisted, 32)
+
+	for _, key := range keys {
+		assert.Equal(t, persisted, key)
+	}
 }
 
 func TestEncryptDecrypt(t *testing.T) {
@@ -98,6 +151,51 @@ func TestEncryptDecrypt_EmptyString(t *testing.T) {
 	decrypted, err := Decrypt(encrypted, key)
 	require.NoError(t, err)
 	assert.Equal(t, "", decrypted)
+}
+
+func TestEncrypt_InvalidAES256KeySize(t *testing.T) {
+	tests := []struct {
+		name string
+		key  []byte
+	}{
+		{name: "16 byte AES-128 key", key: make([]byte, 16)},
+		{name: "24 byte AES-192 key", key: make([]byte, 24)},
+		{name: "too short", key: make([]byte, 31)},
+		{name: "too long", key: make([]byte, 33)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Encrypt("secret", tt.key)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "invalid AES-256 key size")
+		})
+	}
+}
+
+func TestDecrypt_InvalidAES256KeySize(t *testing.T) {
+	validCiphertext, err := Encrypt("secret", testKey(0))
+	require.NoError(t, err)
+
+	tests := []struct {
+		name string
+		key  []byte
+	}{
+		{name: "16 byte AES-128 key", key: make([]byte, 16)},
+		{name: "24 byte AES-192 key", key: make([]byte, 24)},
+		{name: "too short", key: make([]byte, 31)},
+		{name: "too long", key: make([]byte, 33)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Decrypt(validCiphertext, tt.key)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "invalid AES-256 key size")
+		})
+	}
 }
 
 func TestEncryptDecrypt_LongString(t *testing.T) {
