@@ -1,1 +1,0 @@
-import{t as e}from"./index-BYnKY2Tx.js";var t=e();function n(){return(0,t.jsx)(`div`,{children:`Auth Gate`})}export{n as AuthGate};
