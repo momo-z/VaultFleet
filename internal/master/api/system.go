@@ -56,9 +56,13 @@ func (h *SystemHandler) ChangePassword(c *gin.Context) {
 	}
 
 	var user db.User
-	if err := h.DB.DB.First(&user, "username = ?", "admin").Error; err != nil {
+	if err := h.findPasswordChangeUser(c, &user); err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "admin user not found"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "user not found"})
+			return
+		}
+		if errors.Is(err, errPasswordUserAmbiguous) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "authenticated user required"})
 			return
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
@@ -83,4 +87,24 @@ func (h *SystemHandler) ChangePassword(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+var errPasswordUserAmbiguous = errors.New("password change user ambiguous")
+
+func (h *SystemHandler) findPasswordChangeUser(c *gin.Context, user *db.User) error {
+	if userID := c.GetString("user_id"); userID != "" {
+		return h.DB.DB.First(user, "id = ?", userID).Error
+	}
+	if username := c.GetString("username"); username != "" {
+		return h.DB.DB.First(user, "username = ?", username).Error
+	}
+
+	var count int64
+	if err := h.DB.DB.Model(&db.User{}).Count(&count).Error; err != nil {
+		return err
+	}
+	if count != 1 {
+		return errPasswordUserAmbiguous
+	}
+	return h.DB.DB.First(user).Error
 }

@@ -54,8 +54,11 @@ func CheckAndRestore(dataDir string) (bool, error) {
 
 func createRollback(dataDir string) (string, error) {
 	rollbackDir := filepath.Join(dataDir, "rollback")
-	if err := os.MkdirAll(rollbackDir, 0755); err != nil {
+	if err := os.MkdirAll(rollbackDir, 0700); err != nil {
 		return "", fmt.Errorf("create rollback dir %s: %w", rollbackDir, err)
+	}
+	if err := os.Chmod(rollbackDir, 0700); err != nil {
+		return "", fmt.Errorf("secure rollback dir %s: %w", rollbackDir, err)
 	}
 
 	rollbackZip, err := ExportDataDir(dataDir)
@@ -64,7 +67,7 @@ func createRollback(dataDir string) (string, error) {
 	}
 
 	rollbackPath := filepath.Join(rollbackDir, time.Now().Format("20060102-150405")+".zip")
-	if err := os.WriteFile(rollbackPath, rollbackZip.Bytes(), 0644); err != nil {
+	if err := os.WriteFile(rollbackPath, rollbackZip.Bytes(), 0600); err != nil {
 		return "", fmt.Errorf("write rollback zip %s: %w", rollbackPath, err)
 	}
 	return rollbackPath, nil

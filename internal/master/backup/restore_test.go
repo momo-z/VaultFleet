@@ -145,6 +145,46 @@ func TestCheckAndRestore_CreatesRollback(t *testing.T) {
 	assert.NotContains(t, entries, "backup.zip")
 }
 
+func TestCheckAndRestore_CreatesRollbackWithSecurePermissions(t *testing.T) {
+	dataDir := setupTestDataDir(t)
+	createTestBackupZip(t, dataDir, map[string]string{
+		"vaultfleet.db": "restored db",
+	})
+
+	beforePrefix := time.Now().Format("20060102")
+	restored, err := CheckAndRestore(dataDir)
+	afterPrefix := time.Now().Format("20060102")
+
+	require.NoError(t, err)
+	require.True(t, restored)
+
+	rollbackDir := filepath.Join(dataDir, "rollback")
+	rollbackDirInfo, err := os.Stat(rollbackDir)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0700), rollbackDirInfo.Mode().Perm())
+
+	rollbackEntries, err := os.ReadDir(rollbackDir)
+	require.NoError(t, err)
+
+	validPrefixes := map[string]bool{
+		beforePrefix: true,
+		afterPrefix:  true,
+	}
+	var rollbackFile os.DirEntry
+	for _, entry := range rollbackEntries {
+		prefix := strings.SplitN(entry.Name(), "-", 2)[0]
+		if validPrefixes[prefix] && strings.HasSuffix(entry.Name(), ".zip") {
+			rollbackFile = entry
+			break
+		}
+	}
+	require.NotNil(t, rollbackFile, "expected rollback zip")
+
+	rollbackInfo, err := rollbackFile.Info()
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0600), rollbackInfo.Mode().Perm())
+}
+
 func TestCheckAndRestore_BackupZipWithSubdirs(t *testing.T) {
 	dataDir := setupTestDataDir(t)
 	createTestBackupZip(t, dataDir, map[string]string{

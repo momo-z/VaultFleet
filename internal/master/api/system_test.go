@@ -28,6 +28,10 @@ type systemTestSetup struct {
 }
 
 func setupSystemTestRouter(t *testing.T) systemTestSetup {
+	return setupSystemTestRouterWithMiddleware(t, nil)
+}
+
+func setupSystemTestRouterWithMiddleware(t *testing.T, middleware gin.HandlerFunc) systemTestSetup {
 	t.Helper()
 
 	gin.SetMode(gin.TestMode)
@@ -36,6 +40,9 @@ func setupSystemTestRouter(t *testing.T) systemTestSetup {
 	require.NoError(t, err)
 
 	router := gin.New()
+	if middleware != nil {
+		router.Use(middleware)
+	}
 	handler := NewSystemHandler(database)
 	RegisterSystemRoutes(router.Group("/api/system"), handler)
 
@@ -117,7 +124,83 @@ func TestChangePassword_WrongCurrent(t *testing.T) {
 	assert.NoError(t, bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte("secret123")))
 }
 
-func TestChangePassword_UpdatesAdminWhenMultipleUsersExist(t *testing.T) {
+func TestChangePassword_UsesAuthenticatedUserID(t *testing.T) {
+	var owner db.User
+	setup := setupSystemTestRouterWithMiddleware(t, func(c *gin.Context) {
+		c.Set("user_id", owner.ID)
+		c.Next()
+	})
+	owner = createSystemTestUser(t, setup.database, "11111111-1111-1111-1111-111111111111", "owner", "secret123")
+	other := createSystemTestUser(t, setup.database, "22222222-2222-2222-2222-222222222222", "operator", "operator123")
+
+	w := putSystemJSON(t, setup.router, "/api/system/password", map[string]string{
+		"current_password": "secret123",
+		"new_password":     "newsecret123",
+	})
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	var storedOwner db.User
+	require.NoError(t, setup.database.DB.First(&storedOwner, "id = ?", owner.ID).Error)
+	assert.NoError(t, bcrypt.CompareHashAndPassword([]byte(storedOwner.PasswordHash), []byte("newsecret123")))
+
+	var storedOther db.User
+	require.NoError(t, setup.database.DB.First(&storedOther, "id = ?", other.ID).Error)
+	assert.NoError(t, bcrypt.CompareHashAndPassword([]byte(storedOther.PasswordHash), []byte("operator123")))
+}
+
+func TestChangePassword_UsesAuthenticatedUsername(t *testing.T) {
+	const ownerUsername = "owner"
+	setup := setupSystemTestRouterWithMiddleware(t, func(c *gin.Context) {
+		c.Set("username", ownerUsername)
+		c.Next()
+	})
+	owner := createSystemTestUser(t, setup.database, "", "owner", "secret123")
+	other := createSystemTestUser(t, setup.database, "22222222-2222-2222-2222-222222222222", "operator", "operator123")
+
+	w := putSystemJSON(t, setup.router, "/api/system/password", map[string]string{
+		"current_password": "secret123",
+		"new_password":     "newsecret123",
+	})
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	var storedOwner db.User
+	require.NoError(t, setup.database.DB.First(&storedOwner, "id = ?", owner.ID).Error)
+	assert.NoError(t, bcrypt.CompareHashAndPassword([]byte(storedOwner.PasswordHash), []byte("newsecret123")))
+
+	var storedOther db.User
+	require.NoError(t, setup.database.DB.First(&storedOther, "id = ?", other.ID).Error)
+	assert.NoError(t, bcrypt.CompareHashAndPassword([]byte(storedOther.PasswordHash), []byte("operator123")))
+}
+
+func TestChangePassword_UpdatesAuthenticatedUserWhenMultipleUsersExist(t *testing.T) {
+	var owner db.User
+	setup := setupSystemTestRouterWithMiddleware(t, func(c *gin.Context) {
+		c.Set("user_id", owner.ID)
+		c.Set("username", owner.Username)
+		c.Next()
+	})
+	owner = createSystemTestUser(t, setup.database, "11111111-1111-1111-1111-111111111111", "owner", "secret123")
+	other := createSystemTestUser(t, setup.database, "22222222-2222-2222-2222-222222222222", "operator", "operator123")
+
+	w := putSystemJSON(t, setup.router, "/api/system/password", map[string]string{
+		"current_password": "secret123",
+		"new_password":     "newsecret123",
+	})
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	var storedOwner db.User
+	require.NoError(t, setup.database.DB.First(&storedOwner, "id = ?", owner.ID).Error)
+	assert.NoError(t, bcrypt.CompareHashAndPassword([]byte(storedOwner.PasswordHash), []byte("newsecret123")))
+
+	var storedOther db.User
+	require.NoError(t, setup.database.DB.First(&storedOther, "id = ?", other.ID).Error)
+	assert.NoError(t, bcrypt.CompareHashAndPassword([]byte(storedOther.PasswordHash), []byte("operator123")))
+}
+
+func TestChangePassword_NoAuthenticatedUserWithMultipleUsersReturnsBadRequest(t *testing.T) {
 	setup := setupSystemTestRouter(t)
 	other := createSystemTestUser(t, setup.database, "00000000-0000-0000-0000-000000000001", "operator", "operator123")
 	admin := createSystemTestUser(t, setup.database, "ffffffff-ffff-ffff-ffff-ffffffffffff", "admin", "secret123")
@@ -127,11 +210,11 @@ func TestChangePassword_UpdatesAdminWhenMultipleUsersExist(t *testing.T) {
 		"new_password":     "newsecret123",
 	})
 
-	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
 
 	var storedAdmin db.User
 	require.NoError(t, setup.database.DB.First(&storedAdmin, "id = ?", admin.ID).Error)
-	assert.NoError(t, bcrypt.CompareHashAndPassword([]byte(storedAdmin.PasswordHash), []byte("newsecret123")))
+	assert.NoError(t, bcrypt.CompareHashAndPassword([]byte(storedAdmin.PasswordHash), []byte("secret123")))
 
 	var storedOther db.User
 	require.NoError(t, setup.database.DB.First(&storedOther, "id = ?", other.ID).Error)
