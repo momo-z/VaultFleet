@@ -157,7 +157,10 @@ func safeRestorePath(dataDir, zipName string) (string, error) {
 	if cleanName == "." || cleanName == ".." || strings.HasPrefix(cleanName, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("unsafe zip entry path %q", zipName)
 	}
-	if cleanName == "backup.zip" || cleanName == "rollback" || strings.HasPrefix(cleanName, "rollback"+string(filepath.Separator)) {
+	if cleanName == "backup.zip" ||
+		strings.HasPrefix(cleanName, "backup.zip"+string(filepath.Separator)) ||
+		cleanName == "rollback" ||
+		strings.HasPrefix(cleanName, "rollback"+string(filepath.Separator)) {
 		return "", fmt.Errorf("reserved zip entry path %q", zipName)
 	}
 

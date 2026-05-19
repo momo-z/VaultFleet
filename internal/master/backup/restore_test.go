@@ -220,6 +220,23 @@ func TestCheckAndRestore_ReservedLaterEntryDoesNotMutateDataDir(t *testing.T) {
 	assert.FileExists(t, filepath.Join(dataDir, "backup.zip"))
 }
 
+func TestCheckAndRestore_BackupZipDescendantDoesNotMutateDataDir(t *testing.T) {
+	dataDir := setupTestDataDir(t)
+	createTestBackupZipEntries(t, dataDir, []zipEntrySpec{
+		{name: "vaultfleet.db", content: "mutated db", mode: 0644},
+		{name: "backup.zip/child", content: "reserved", mode: 0644},
+	})
+
+	restored, err := CheckAndRestore(dataDir)
+
+	require.Error(t, err)
+	assert.False(t, restored)
+	assert.Contains(t, err.Error(), "reserved zip entry path")
+	assertFileContent(t, filepath.Join(dataDir, "vaultfleet.db"), "db data")
+	assert.DirExists(t, filepath.Join(dataDir, "rollback"))
+	assert.FileExists(t, filepath.Join(dataDir, "backup.zip"))
+}
+
 func TestCheckAndRestore_ReplacesExistingSymlinkWithRegularFile(t *testing.T) {
 	dataDir := setupTestDataDir(t)
 	outsidePath := filepath.Join(filepath.Dir(dataDir), "outside.txt")
