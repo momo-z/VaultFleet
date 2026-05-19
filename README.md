@@ -391,6 +391,16 @@ See also:
 - `docs/superpowers/specs/2026-05-18-vaultfleet-design.md`
 - `docs/superpowers/specs/2026-05-19-vaultfleet-e2e-acceptance-test.md`
 
+## Report an issue
+
+For bugs or troubleshooting support, read the [issue reporting and log collection guide](docs/support.md), then open a GitHub Issue:
+
+- [Choose an Issue type](https://github.com/momo-z/VaultFleet/issues/new/choose)
+- [Bug report](https://github.com/momo-z/VaultFleet/issues/new?template=bug_report.yml)
+- [Support request](https://github.com/momo-z/VaultFleet/issues/new?template=support_request.yml)
+
+VaultFleet does not connect to or store your GitHub account. GitHub uses your browser login, and logs should be redacted before posting tokens, passwords, or storage credentials.
+
 ## References
 
 - [Komari Monitor](https://github.com/komari-monitor/komari)
