@@ -5,6 +5,8 @@ MASTER_URL=""
 ENROLL_TOKEN=""
 AGENT_URL=""
 AGENT_SHA256=""
+GITHUB_PROXY=""
+GITHUB_REPO="momo-z/VaultFleet"
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/vaultfleet"
 RESTIC_VERSION="0.17.3"
@@ -16,7 +18,7 @@ RCLONE_SHA256_AMD64="7d69057e69385f6514a9684c7eaa424d972096b130284bb34dd967c4ed4
 RCLONE_SHA256_ARM64="1b08be34622f1f9bb9b069a85d036bba822b690790215c18a9418dbaf19505fe"
 
 usage() {
-    echo "Usage: $0 --server <master-url> --token <enroll-token> [--agent-url <agent-binary-url>] [--agent-sha256 <sha256>]"
+    echo "Usage: $0 --server <master-url> --token <enroll-token> [--github-proxy <proxy-url>] [--agent-url <agent-binary-url>] [--agent-sha256 <sha256>]"
     exit 1
 }
 
@@ -71,6 +73,11 @@ while [[ $# -gt 0 ]]; do
             AGENT_URL="$2"
             shift 2
             ;;
+        --github-proxy)
+            [[ $# -ge 2 && "$2" != --* ]] || usage
+            GITHUB_PROXY="$2"
+            shift 2
+            ;;
         --agent-sha256)
             [[ $# -ge 2 && "$2" != --* ]] || usage
             AGENT_SHA256="$2"
@@ -115,7 +122,11 @@ if [[ "$OS" != "linux" ]]; then
 fi
 
 if [[ -z "$AGENT_URL" ]]; then
-    AGENT_URL="${MASTER_URL%/}/download/agent-linux-${ARCH}"
+    GITHUB_RELEASE_BASE="https://github.com/${GITHUB_REPO}/releases/latest/download"
+    AGENT_URL="${GITHUB_RELEASE_BASE}/vaultfleet-agent-linux-${ARCH}"
+    if [[ -n "$GITHUB_PROXY" ]]; then
+        AGENT_URL="${GITHUB_PROXY%/}/${AGENT_URL}"
+    fi
 fi
 if [[ -n "$AGENT_SHA256" && ! "$AGENT_SHA256" =~ ^[0-9a-fA-F]{64}$ ]]; then
     echo "Agent SHA256 must be a 64-character hex digest"

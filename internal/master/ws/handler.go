@@ -13,9 +13,10 @@ import (
 	"vaultfleet/pkg/protocol"
 )
 
-const maxMessageBytes = 1 << 20
-
-var pongWait = 60 * time.Second
+const (
+	maxMessageBytes = 1 << 20
+	defaultPongWait = 60 * time.Second
+)
 
 type AgentAuthFunc func(token string) (agentID string, err error)
 type PolicyLookupFunc func(agentID string) (*protocol.Message, bool)
@@ -30,9 +31,9 @@ type Handler struct {
 	PolicyAckProcessor PolicyAckProcessorFunc
 	AgentStateUpdater  func(agentID string, status string, lastSeenAt *time.Time) error
 	upgrader           websocket.Upgrader
+	now                func() time.Time
+	pongWait           time.Duration
 }
-
-var timeNow = time.Now
 
 func NewHandler(hub *Hub, eventBus *events.Bus, authAgent AgentAuthFunc, policyLookup PolicyLookupFunc, taskResultProcess TaskResultProcessorFunc) *Handler {
 	return &Handler{
@@ -41,6 +42,8 @@ func NewHandler(hub *Hub, eventBus *events.Bus, authAgent AgentAuthFunc, policyL
 		authAgent:         authAgent,
 		policyLookup:      policyLookup,
 		taskResultProcess: taskResultProcess,
+		now:               time.Now,
+		pongWait:          defaultPongWait,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: allowAgentOrigin,
 		},
@@ -80,7 +83,7 @@ func (h *Handler) HandleWebSocket(c *gin.Context) {
 
 	safeConn := NewSafeConn(conn)
 	h.hub.Add(agentID, safeConn)
-	now := timeNow()
+	now := h.now()
 	h.hub.UpdateLastSeen(agentID, now)
 	h.updateAgentState(agentID, "online", &now)
 	defer h.cleanupConnection(agentID, safeConn)
@@ -106,9 +109,9 @@ func (h *Handler) cleanupConnection(agentID string, conn *SafeConn) {
 
 func (h *Handler) readLoop(agentID string, conn *SafeConn) {
 	conn.SetReadLimit(maxMessageBytes)
-	_ = conn.SetReadDeadline(time.Now().Add(pongWait))
+	_ = conn.SetReadDeadline(time.Now().Add(h.pongWait))
 	conn.SetPongHandler(func(string) error {
-		return conn.SetReadDeadline(time.Now().Add(pongWait))
+		return conn.SetReadDeadline(time.Now().Add(h.pongWait))
 	})
 
 	for {
@@ -116,7 +119,7 @@ func (h *Handler) readLoop(agentID string, conn *SafeConn) {
 		if err := conn.ReadJSON(&msg); err != nil {
 			return
 		}
-		_ = conn.SetReadDeadline(time.Now().Add(pongWait))
+		_ = conn.SetReadDeadline(time.Now().Add(h.pongWait))
 		h.dispatch(agentID, msg)
 	}
 }
@@ -124,7 +127,7 @@ func (h *Handler) readLoop(agentID string, conn *SafeConn) {
 func (h *Handler) dispatch(agentID string, msg protocol.Message) {
 	switch msg.Type {
 	case protocol.TypeHeartbeat:
-		now := timeNow()
+		now := h.now()
 		h.hub.UpdateLastSeen(agentID, now)
 		h.hub.MarkOnline(agentID)
 		h.updateAgentState(agentID, "online", &now)

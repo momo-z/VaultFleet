@@ -17,7 +17,12 @@ func TestInstallScriptMatchesAcceptanceContract(t *testing.T) {
 		t.Fatal("agent url and sha256 must be optional for acceptance installer flow")
 	}
 	for _, want := range []string{
-		`AGENT_URL="${MASTER_URL%/}/download/agent-linux-${ARCH}"`,
+		`GITHUB_REPO="momo-z/VaultFleet"`,
+		`GITHUB_PROXY=""`,
+		`--github-proxy`,
+		`--agent-url <agent-binary-url>`,
+		`AGENT_URL="${GITHUB_RELEASE_BASE}/vaultfleet-agent-linux-${ARCH}"`,
+		`AGENT_URL="${GITHUB_PROXY%/}/${AGENT_URL}"`,
 		`if [[ ! -x "${INSTALL_DIR}/restic" ]]; then`,
 		`if [[ ! -x "${INSTALL_DIR}/rclone" ]]; then`,
 		"ensure_command bunzip2 bzip2",

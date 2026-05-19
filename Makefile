@@ -2,6 +2,7 @@
 .PHONY: build-master build-agent build-all test docker-build clean
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+IMAGE ?= ghcr.io/momo-z/vaultfleet
 LDFLAGS := -ldflags "-s -w -X main.version=$(VERSION)"
 
 build-master:
@@ -16,7 +17,7 @@ test:
 	go test ./... -v -race -count=1
 
 docker-build:
-	docker build -t vaultfleet/master:$(VERSION) -t vaultfleet/master:latest -f build/Dockerfile .
+	docker build -t $(IMAGE):$(VERSION) -t $(IMAGE):latest -f build/Dockerfile .
 
 clean:
 	rm -rf bin/

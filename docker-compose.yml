@@ -1,10 +1,7 @@
 # docker-compose.yml
 services:
   vaultfleet:
-    image: vaultfleet/master:latest
-    build:
-      context: .
-      dockerfile: build/Dockerfile
+    image: ghcr.io/momo-z/vaultfleet:latest
     ports:
       - "8080:8080"
     volumes:

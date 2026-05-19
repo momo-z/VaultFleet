@@ -117,15 +117,13 @@ func TestHandler_ValidTokenAcceptedAndHubOnline(t *testing.T) {
 
 func TestHandler_HeartbeatDispatchUpdatesLastSeen(t *testing.T) {
 	setup := setupHandlerTest(t, validTestAuth, noPolicy)
+	fixedNow := time.Date(2026, 5, 18, 10, 0, 0, 0, time.UTC)
+	setup.router = gin.New()
+	handler := NewHandler(setup.hub, setup.bus, validTestAuth, noPolicy, nil)
+	handler.now = func() time.Time { return fixedNow }
+	setup.router.GET("/ws", handler.HandleWebSocket)
 	server := httptest.NewServer(setup.router)
 	t.Cleanup(server.Close)
-
-	fixedNow := time.Date(2026, 5, 18, 10, 0, 0, 0, time.UTC)
-	originalTimeNow := timeNow
-	timeNow = func() time.Time { return fixedNow }
-	t.Cleanup(func() {
-		timeNow = originalTimeNow
-	})
 
 	conn, _, err := websocket.DefaultDialer.Dial(websocketURL(server.URL, "/ws", url.Values{"token": []string{"valid-token"}}), nil)
 	require.NoError(t, err)
@@ -186,14 +184,12 @@ func TestHandler_HeartbeatDispatchMarksAgentOnline(t *testing.T) {
 
 func TestHandler_HeartbeatRefreshesReadDeadline(t *testing.T) {
 	setup := setupHandlerTest(t, validTestAuth, noPolicy)
+	setup.router = gin.New()
+	handler := NewHandler(setup.hub, setup.bus, validTestAuth, noPolicy, nil)
+	handler.pongWait = 120 * time.Millisecond
+	setup.router.GET("/ws", handler.HandleWebSocket)
 	server := httptest.NewServer(setup.router)
 	t.Cleanup(server.Close)
-
-	originalPongWait := pongWait
-	pongWait = 120 * time.Millisecond
-	t.Cleanup(func() {
-		pongWait = originalPongWait
-	})
 
 	conn, _, err := websocket.DefaultDialer.Dial(websocketURL(server.URL, "/ws", url.Values{"token": []string{"valid-token"}}), nil)
 	require.NoError(t, err)
