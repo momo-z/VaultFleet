@@ -100,7 +100,7 @@ func (s *Service) Test(ctx context.Context, request Request) Result {
 	runCtx, cancel := context.WithTimeout(ctx, s.timeout())
 	defer cancel()
 
-	if err := s.runner().Run(runCtx, configPath, "lsd", "vaultfleet:"); err != nil {
+	if err := s.runner().Run(runCtx, configPath, "lsd", rcloneTestTarget(request)); err != nil {
 		result.Error = s.redactError(err, request)
 		result.LatencyMs = s.latencySince(start)
 		return result
@@ -154,6 +154,9 @@ func rcloneConfigContents(request Request) (string, error) {
 	sort.Strings(keys)
 
 	for _, key := range keys {
+		if shouldOmitConfigKey(request.RcloneType, key) {
+			continue
+		}
 		value, err := rcloneConfigValue(request.RcloneType, key, request.RcloneConfig[key])
 		if err != nil {
 			return "", err
@@ -166,23 +169,68 @@ func rcloneConfigContents(request Request) (string, error) {
 	return builder.String(), nil
 }
 
+func rcloneTestTarget(request Request) string {
+	if request.RcloneType == "s3" {
+		bucket := strings.Trim(strings.TrimSpace(request.RcloneConfig["bucket"]), "/")
+		if bucket != "" {
+			return "vaultfleet:" + bucket
+		}
+	}
+	return "vaultfleet:"
+}
+
+func shouldOmitConfigKey(rcloneType string, key string) bool {
+	return rcloneType == "s3" && key == "bucket"
+}
+
 func ValidateRequest(request Request) error {
 	if containsLineBreak(request.RcloneType) {
 		return fmt.Errorf("rclone type contains invalid characters")
 	}
 	for key, value := range request.RcloneConfig {
-		switch {
-		case key == "":
-			return fmt.Errorf("rclone config key cannot be empty")
-		case strings.EqualFold(key, "type"):
-			return fmt.Errorf("rclone config key is reserved")
-		case containsLineBreak(key):
-			return fmt.Errorf("rclone config key contains invalid characters")
-		case containsLineBreak(value):
+		if err := validateRcloneConfigKey(key); err != nil {
+			return err
+		}
+		if containsLineBreak(value) {
 			return fmt.Errorf("rclone config value contains invalid characters")
 		}
 	}
 	return nil
+}
+
+func validateRcloneConfigKey(key string) error {
+	trimmed := strings.TrimSpace(key)
+	switch {
+	case trimmed == "":
+		return fmt.Errorf("rclone config key cannot be empty")
+	case strings.EqualFold(trimmed, "type"):
+		return fmt.Errorf("rclone config key is reserved")
+	case key != trimmed:
+		return fmt.Errorf("rclone config key contains invalid characters")
+	case !isSafeRcloneConfigKey(key):
+		return fmt.Errorf("rclone config key contains invalid characters")
+	}
+	return nil
+}
+
+func isSafeRcloneConfigKey(key string) bool {
+	for i := 0; i < len(key); i++ {
+		char := key[i]
+		if char >= 'a' && char <= 'z' {
+			continue
+		}
+		if char >= 'A' && char <= 'Z' {
+			continue
+		}
+		if char >= '0' && char <= '9' {
+			continue
+		}
+		if char == '_' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func containsLineBreak(value string) bool {

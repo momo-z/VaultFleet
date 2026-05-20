@@ -89,8 +89,36 @@ func TestServiceRejectsUnsafeRcloneConfigKeysAndValues(t *testing.T) {
 			config: map[string]string{"type": "sftp"},
 		},
 		{
+			name:   "reserved type key with trailing space",
+			config: map[string]string{"type ": "sftp"},
+		},
+		{
+			name:   "reserved type key with leading space",
+			config: map[string]string{" type": "sftp"},
+		},
+		{
+			name:   "reserved type key with tab",
+			config: map[string]string{"type\t": "sftp"},
+		},
+		{
 			name:   "empty key",
 			config: map[string]string{"": "value"},
+		},
+		{
+			name:   "blank key after trim",
+			config: map[string]string{" ": "value"},
+		},
+		{
+			name:   "key with equals",
+			config: map[string]string{"bad=key": "value"},
+		},
+		{
+			name:   "key with brackets",
+			config: map[string]string{"[section]": "value"},
+		},
+		{
+			name:   "key with space",
+			config: map[string]string{"bad key": "value"},
 		},
 		{
 			name:   "key with newline",
@@ -117,6 +145,64 @@ func TestServiceRejectsUnsafeRcloneConfigKeysAndValues(t *testing.T) {
 			assert.Equal(t, 0, runner.calls)
 		})
 	}
+}
+
+func TestServiceUsesS3BucketInTargetAndOmitsBucketFromTempConfig(t *testing.T) {
+	runner := &fakeRunner{
+		t: t,
+		onRun: func(t *testing.T, _ context.Context, configPath string) error {
+			t.Helper()
+
+			contents, err := os.ReadFile(configPath)
+			require.NoError(t, err)
+
+			config := string(contents)
+			assert.NotContains(t, config, "bucket =")
+			assert.Contains(t, config, "provider = Cloudflare")
+			return nil
+		},
+	}
+	service := NewService(runner)
+
+	result := service.Test(context.Background(), Request{
+		RcloneType: "s3",
+		RcloneConfig: map[string]string{
+			"provider": "Cloudflare",
+			"bucket":   " /bucket-a/ ",
+		},
+	})
+
+	assert.True(t, result.OK)
+	require.Equal(t, 1, runner.calls)
+	assert.Equal(t, []string{"lsd", "vaultfleet:bucket-a"}, runner.args)
+}
+
+func TestServiceUsesS3BucketRootTargetWhenBucketIsEmpty(t *testing.T) {
+	runner := &fakeRunner{
+		t: t,
+		onRun: func(t *testing.T, _ context.Context, configPath string) error {
+			t.Helper()
+
+			contents, err := os.ReadFile(configPath)
+			require.NoError(t, err)
+
+			assert.NotContains(t, string(contents), "bucket =")
+			return nil
+		},
+	}
+	service := NewService(runner)
+
+	result := service.Test(context.Background(), Request{
+		RcloneType: "s3",
+		RcloneConfig: map[string]string{
+			"provider": "Cloudflare",
+			"bucket":   "  ",
+		},
+	})
+
+	assert.True(t, result.OK)
+	require.Equal(t, 1, runner.calls)
+	assert.Equal(t, []string{"lsd", "vaultfleet:"}, runner.args)
 }
 
 func TestServiceRedactsOverlappingSecretsByLongestFirst(t *testing.T) {
