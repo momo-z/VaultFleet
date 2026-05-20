@@ -142,7 +142,7 @@ func (p *PolicyChangedPusher) hasActivePolicyPushCommand(agentID string, policyI
 			[]string{commands.CommandStatusPending, commands.CommandStatusDispatched, commands.CommandStatusRunning},
 		)
 	if !policyUpdatedAt.IsZero() {
-		query = query.Where("created_at >= ?", policyUpdatedAt)
+		query = query.Where("policy_updated_at = ?", policyUpdatedAt)
 	}
 	if err := query.Count(&count).Error; err != nil {
 		log.Printf("check active policy command for agent %s failed: %v", agentID, err)

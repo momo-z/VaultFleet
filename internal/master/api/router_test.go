@@ -388,6 +388,53 @@ func TestPolicyChangedPusherDoesNotDuplicateConcurrentActivePolicyPushCommands(t
 	assert.Equal(t, int64(1), commandCount)
 }
 
+func TestPolicyChangedPusherCreatesNewCommandForUpdatedPolicyVersion(t *testing.T) {
+	database := newRouterAssemblyDatabase(t)
+	agent, storage := createRouterAssemblyPolicyFixtures(t, database)
+	policy := createStorageTestPolicy(t, database, agent.ID, storage.ID, false)
+	hub := &fakeCommandHub{online: map[string]bool{agent.ID: true}}
+	tracker := NewPolicyPushTracker()
+	commandService := commands.NewService(database, hub)
+	pusher := NewPolicyChangedPusher(database, hub, nil)
+	pusher.CommandLookup = CurrentPolicyCommandLookupWithTracker(database, tracker)
+	pusher.Commands = commandService
+	event := events.Event{
+		Type: events.PolicyChanged,
+		Payload: map[string]interface{}{
+			"agent_id": agent.ID,
+			"action":   "updated",
+		},
+	}
+
+	pusher.Handle(event)
+	var first db.AgentCommand
+	require.NoError(t, database.DB.First(&first, "agent_id = ? AND type = ? AND policy_id = ?", agent.ID, protocol.TypePolicyPush, policy.ID).Error)
+	require.NotNil(t, first.PolicyUpdatedAt)
+
+	newVersion := first.PolicyUpdatedAt.Add(time.Second)
+	require.NoError(t, database.DB.Model(&policy).Updates(map[string]any{
+		"updated_at": newVersion,
+		"schedule":   "0 4 * * *",
+	}).Error)
+	require.NoError(t, database.DB.Model(&db.AgentCommand{}).
+		Where("id = ?", first.ID).
+		Update("created_at", newVersion.Add(time.Second)).Error)
+
+	pusher.Handle(event)
+
+	var commandCount int64
+	require.NoError(t, database.DB.Model(&db.AgentCommand{}).
+		Where("agent_id = ? AND type = ? AND policy_id = ? AND storage_id = ?", agent.ID, protocol.TypePolicyPush, policy.ID, storage.ID).
+		Count(&commandCount).Error)
+	assert.Equal(t, int64(2), commandCount)
+
+	var second db.AgentCommand
+	require.NoError(t, database.DB.Where("agent_id = ? AND type = ? AND policy_id = ? AND policy_updated_at = ?", agent.ID, protocol.TypePolicyPush, policy.ID, newVersion).
+		First(&second).Error)
+	require.NotNil(t, second.PolicyUpdatedAt)
+	assert.True(t, second.PolicyUpdatedAt.Equal(newVersion))
+}
+
 func TestPolicyChangedPusherCommandRefsMatchPolicyPayloadAndTrackerMessage(t *testing.T) {
 	database := newRouterAssemblyDatabase(t)
 	agent := createStorageTestAgent(t, database, "Tokyo-1")

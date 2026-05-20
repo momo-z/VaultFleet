@@ -113,9 +113,13 @@ func TestRuntimeReconnectPolicyPushIsDurableAndNotDuplicated(t *testing.T) {
 	var command db.AgentCommand
 	require.NoError(t, database.DB.First(&command, "agent_id = ? AND message_id = ?", agent.ID, pushed.ID).Error)
 	assert.Equal(t, protocol.TypePolicyPush, command.Type)
-	assert.Equal(t, commands.CommandStatusDispatched, command.Status)
 	assert.Equal(t, policy.ID, command.PolicyID)
 	assert.Equal(t, storage.ID, command.StorageID)
+	require.Eventually(t, func() bool {
+		var updated db.AgentCommand
+		require.NoError(t, database.DB.First(&updated, "id = ?", command.ID).Error)
+		return updated.Status == commands.CommandStatusDispatched
+	}, time.Second, 10*time.Millisecond)
 
 	require.NoError(t, conn.SetReadDeadline(time.Now().Add(100*time.Millisecond)))
 	var duplicate protocol.Message
