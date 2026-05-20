@@ -14,6 +14,7 @@ import (
 	"vaultfleet/internal/master/commands"
 	"vaultfleet/internal/master/db"
 	"vaultfleet/internal/master/events"
+	"vaultfleet/internal/master/storagecheck"
 	"vaultfleet/pkg/protocol"
 )
 
@@ -384,11 +385,11 @@ func policyRepoPath(rcloneType string, rcloneConfig map[string]string, repoPath 
 	if rcloneType != "s3" {
 		return repoPath
 	}
-	bucket := rcloneConfig["bucket"]
+	bucket := storagecheck.S3BucketPathSegment(rcloneConfig["bucket"])
 	if bucket == "" {
 		return repoPath
 	}
-	return strings.Trim(bucket, "/") + "/" + strings.TrimLeft(repoPath, "/")
+	return bucket + "/" + strings.TrimLeft(repoPath, "/")
 }
 
 func storageRcloneConfig(rcloneType string, rcloneConfig map[string]string) map[string]string {

@@ -171,12 +171,16 @@ func rcloneConfigContents(request Request) (string, error) {
 
 func rcloneTestTarget(request Request) string {
 	if request.RcloneType == "s3" {
-		bucket := strings.Trim(strings.TrimSpace(request.RcloneConfig["bucket"]), "/")
+		bucket := S3BucketPathSegment(request.RcloneConfig["bucket"])
 		if bucket != "" {
 			return "vaultfleet:" + bucket
 		}
 	}
 	return "vaultfleet:"
+}
+
+func S3BucketPathSegment(bucket string) string {
+	return strings.Trim(strings.TrimSpace(bucket), "/")
 }
 
 func shouldOmitConfigKey(rcloneType string, key string) bool {

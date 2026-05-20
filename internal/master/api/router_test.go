@@ -255,6 +255,32 @@ func TestCurrentPolicyLookupMovesS3BucketIntoRepoPath(t *testing.T) {
 	assert.Equal(t, "https://minio.example.test", payload.Storage.RcloneConfig["endpoint"])
 }
 
+func TestCurrentPolicyLookupNormalizesS3BucketLikeStorageCheck(t *testing.T) {
+	database := newRouterAssemblyDatabase(t)
+	agent := createStorageTestAgent(t, database, "Tokyo-1")
+	storage := db.StorageConfig{
+		Name:       "MinIO",
+		RcloneType: "s3",
+		RcloneConfig: mustEncryptMap(t, database, map[string]any{
+			"provider":          "Other",
+			"endpoint":          "https://minio.example.test",
+			"access_key_id":     "AKID123",
+			"secret_access_key": "SECRET456",
+			"bucket":            " /test/ ",
+		}),
+	}
+	require.NoError(t, database.DB.Create(&storage).Error)
+	createStorageTestPolicy(t, database, agent.ID, storage.ID, false)
+
+	msg, ok := CurrentPolicyLookup(database)(agent.ID)
+
+	require.True(t, ok)
+	payload, err := protocol.ParsePayload[protocol.PolicyPushPayload](msg)
+	require.NoError(t, err)
+	assert.Equal(t, "test/vaultfleet/"+agent.ID, payload.Storage.RepoPath)
+	assert.NotContains(t, payload.Storage.RcloneConfig, "bucket")
+}
+
 func TestCurrentPolicyLookupRejectsNonStringRcloneConfigValues(t *testing.T) {
 	database := newRouterAssemblyDatabase(t)
 	agent := createStorageTestAgent(t, database, "Tokyo-1")
