@@ -259,8 +259,19 @@ func (s *Service) CompleteTaskResult(ctx context.Context, agentID string, messag
 	}
 
 	return s.DB.DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		update := tx.Model(&db.AgentCommand{}).
+		var command db.AgentCommand
+		err := tx.
 			Where("agent_id = ? AND message_id = ? AND status NOT IN ?", agentID, messageID, terminalStatuses()).
+			First(&command).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+
+		update := tx.Model(&db.AgentCommand{}).
+			Where("id = ? AND status NOT IN ?", command.ID, terminalStatuses()).
 			Updates(map[string]any{
 				"status":        commandStatus,
 				"result":        string(rawResult),
@@ -275,18 +286,21 @@ func (s *Service) CompleteTaskResult(ctx context.Context, agentID string, messag
 			return nil
 		}
 
+		taskUpdates := map[string]any{
+			"status":      result.Status,
+			"snapshot_id": result.SnapshotID,
+			"duration_ms": result.DurationMs,
+			"repo_size":   result.RepoSize,
+			"error_log":   result.ErrorLog,
+			"finished_at": finishedAt,
+			"updated_at":  now,
+		}
+		if startedAt != nil {
+			taskUpdates["started_at"] = startedAt
+		}
 		return tx.Model(&db.TaskHistory{}).
-			Where("agent_id = ? AND message_id = ? AND command_id <> ?", agentID, messageID, "").
-			Updates(map[string]any{
-				"status":      result.Status,
-				"snapshot_id": result.SnapshotID,
-				"duration_ms": result.DurationMs,
-				"repo_size":   result.RepoSize,
-				"error_log":   result.ErrorLog,
-				"started_at":  startedAt,
-				"finished_at": finishedAt,
-				"updated_at":  now,
-			}).Error
+			Where("command_id = ?", command.ID).
+			Updates(taskUpdates).Error
 	})
 }
 
@@ -376,7 +390,7 @@ func (s *Service) timeoutCommandAndTask(ctx context.Context, command db.AgentCom
 			return nil
 		}
 		return tx.Model(&db.TaskHistory{}).
-			Where("command_id = ?", command.ID).
+			Where("command_id = ? AND status IN ?", command.ID, []string{TaskStatusPending, TaskStatusRunning}).
 			Updates(map[string]any{
 				"status":      TaskStatusTimeout,
 				"error_log":   "command timeout",

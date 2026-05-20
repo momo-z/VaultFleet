@@ -17,6 +17,7 @@ import (
 
 	agentenroll "vaultfleet/internal/agent/enroll"
 	masterapi "vaultfleet/internal/master/api"
+	"vaultfleet/internal/master/commands"
 	"vaultfleet/internal/master/db"
 	"vaultfleet/internal/master/events"
 	"vaultfleet/pkg/protocol"
@@ -430,6 +431,53 @@ func TestHandler_SnapshotListRespDispatchesToWaiter(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for snapshot list response")
 	}
+}
+
+func TestHandler_SnapshotListRespWithoutWaiterCompletesDurableCommand(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	database, err := db.New(t.TempDir())
+	require.NoError(t, err)
+	agent := db.Agent{Name: "Tokyo-1", Status: "online"}
+	require.NoError(t, database.DB.Create(&agent).Error)
+	commandService := commands.NewService(database, nil)
+	request, err := protocol.NewMessage(protocol.TypeSnapshotListReq, protocol.SnapshotListReqPayload{AgentID: agent.ID})
+	require.NoError(t, err)
+	command, err := commandService.CreateCommand(t.Context(), commands.CreateCommandInput{
+		AgentID: agent.ID,
+		Type:    protocol.TypeSnapshotListReq,
+		Message: *request,
+	})
+	require.NoError(t, err)
+	require.NoError(t, database.DB.Model(&db.AgentCommand{}).
+		Where("id = ?", command.ID).
+		Update("status", commands.CommandStatusDispatched).Error)
+	snapshotTime := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
+	response, err := protocol.NewMessage(protocol.TypeSnapshotListResp, protocol.SnapshotListRespPayload{
+		AgentID: agent.ID,
+		Snapshots: []protocol.SnapshotInfo{
+			{ID: "snap-durable", Time: snapshotTime, Paths: []string{"/srv"}, Size: 1024},
+		},
+	})
+	require.NoError(t, err)
+	response.ID = request.ID
+
+	hub := NewHub()
+	handler := NewHandler(hub, events.NewBus(), validTestAuth, noPolicy, nil)
+	handler.SnapshotListResponseProcessor = masterapi.NewSnapshotListResponseProcessor(database, commandService)
+	handler.dispatch(agent.ID, *response)
+
+	var snapshot db.Snapshot
+	require.NoError(t, database.DB.First(&snapshot, "agent_id = ? AND snapshot_id = ?", agent.ID, "snap-durable").Error)
+	assert.True(t, snapshot.Timestamp.Equal(snapshotTime))
+	assert.JSONEq(t, `["/srv"]`, snapshot.Paths)
+	assert.Equal(t, int64(1024), snapshot.Size)
+
+	var found db.AgentCommand
+	require.NoError(t, database.DB.First(&found, "id = ?", command.ID).Error)
+	assert.Equal(t, commands.CommandStatusSucceeded, found.Status)
+	assert.Contains(t, found.Result, `"snap-durable"`)
+	assert.Empty(t, found.ErrorMessage)
+	assert.NotNil(t, found.CompletedAt)
 }
 
 func TestHandler_OldConnectionCleanupDoesNotRemoveReplacementConnection(t *testing.T) {

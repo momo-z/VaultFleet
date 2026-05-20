@@ -36,6 +36,11 @@ type TaskResultCommandCompleter interface {
 	CompleteTaskResult(ctx context.Context, agentID string, messageID string, result protocol.TaskResultPayload) error
 }
 
+type SnapshotListCommandCompleter interface {
+	CompleteSnapshotList(ctx context.Context, agentID string, messageID string, result protocol.SnapshotListRespPayload) error
+	FailCommand(ctx context.Context, agentID string, messageID string, errorText string) error
+}
+
 type snapshotResponse struct {
 	ID         string    `json:"id"`
 	SnapshotID string    `json:"snapshot_id"`
@@ -219,6 +224,31 @@ func NewTaskResultProcessor(database *db.Database, completer ...TaskResultComman
 			}
 		}
 		return recordTaskResult(database, agentID, msg.ID, *result)
+	}
+}
+
+func NewSnapshotListResponseProcessor(database *db.Database, completer SnapshotListCommandCompleter) func(agentID string, msg protocol.Message) error {
+	return func(agentID string, msg protocol.Message) error {
+		payload, err := protocol.ParsePayload[protocol.SnapshotListRespPayload](&msg)
+		if err != nil {
+			return err
+		}
+		if payload.Error != "" {
+			if completer == nil {
+				return nil
+			}
+			return completer.FailCommand(context.Background(), agentID, msg.ID, payload.Error)
+		}
+		if err := upsertSnapshots(database, agentID, payload.Snapshots); err != nil {
+			if completer != nil {
+				_ = completer.FailCommand(context.Background(), agentID, msg.ID, "database error")
+			}
+			return err
+		}
+		if completer == nil {
+			return nil
+		}
+		return completer.CompleteSnapshotList(context.Background(), agentID, msg.ID, *payload)
 	}
 }
 

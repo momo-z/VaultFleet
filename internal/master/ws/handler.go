@@ -22,19 +22,21 @@ type AgentAuthFunc func(token string) (agentID string, err error)
 type PolicyLookupFunc func(agentID string) (*protocol.Message, bool)
 type TaskResultProcessorFunc func(agentID string, msg protocol.Message) error
 type PolicyAckProcessorFunc func(agentID string, msg protocol.Message) error
+type SnapshotListResponseProcessorFunc func(agentID string, msg protocol.Message) error
 type PendingCommandDispatcherFunc func(agentID string) error
 type Handler struct {
-	hub                      *Hub
-	eventBus                 *events.Bus
-	authAgent                AgentAuthFunc
-	policyLookup             PolicyLookupFunc
-	taskResultProcess        TaskResultProcessorFunc
-	PolicyAckProcessor       PolicyAckProcessorFunc
-	PendingCommandDispatcher PendingCommandDispatcherFunc
-	AgentStateUpdater        func(agentID string, status string, lastSeenAt *time.Time) error
-	upgrader                 websocket.Upgrader
-	now                      func() time.Time
-	pongWait                 time.Duration
+	hub                           *Hub
+	eventBus                      *events.Bus
+	authAgent                     AgentAuthFunc
+	policyLookup                  PolicyLookupFunc
+	taskResultProcess             TaskResultProcessorFunc
+	PolicyAckProcessor            PolicyAckProcessorFunc
+	SnapshotListResponseProcessor SnapshotListResponseProcessorFunc
+	PendingCommandDispatcher      PendingCommandDispatcherFunc
+	AgentStateUpdater             func(agentID string, status string, lastSeenAt *time.Time) error
+	upgrader                      websocket.Upgrader
+	now                           func() time.Time
+	pongWait                      time.Duration
 }
 
 func NewHandler(hub *Hub, eventBus *events.Bus, authAgent AgentAuthFunc, policyLookup PolicyLookupFunc, taskResultProcess TaskResultProcessorFunc) *Handler {
@@ -167,7 +169,12 @@ func (h *Handler) dispatch(agentID string, msg protocol.Message) {
 			},
 		})
 	case protocol.TypeDirBrowseResp, protocol.TypeSnapshotListResp:
-		h.hub.HandleResponse(agentID, msg)
+		handled := h.hub.HandleResponse(agentID, msg)
+		if !handled && msg.Type == protocol.TypeSnapshotListResp && h.SnapshotListResponseProcessor != nil {
+			if err := h.SnapshotListResponseProcessor(agentID, msg); err != nil {
+				log.Printf("process snapshot list response failed for agent %s: %v", agentID, err)
+			}
+		}
 	}
 }
 
