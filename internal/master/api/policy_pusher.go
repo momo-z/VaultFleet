@@ -79,10 +79,11 @@ func (p *PolicyChangedPusher) EnsureDurableCommand(ctx context.Context, agentID 
 	if !ok || current == nil || current.Message == nil {
 		return false
 	}
-	if p.hasActivePolicyPushCommand(agentID, current.PolicyID, current.StorageID, current.PolicyUpdatedAt) {
+	now := p.now()
+	if p.hasActivePolicyPushCommand(agentID, current.PolicyID, current.StorageID, current.PolicyUpdatedAt, now) {
 		return true
 	}
-	p.retireSupersededPolicyPushCommands(agentID, current.PolicyID, current.StorageID, current.PolicyUpdatedAt)
+	p.retireSupersededPolicyPushCommands(agentID, current.PolicyID, current.StorageID, current.PolicyUpdatedAt, now)
 	if _, err := p.Commands.CreateCommand(ctx, commands.CreateCommandInput{
 		AgentID:         agentID,
 		Type:            protocol.TypePolicyPush,
@@ -97,7 +98,7 @@ func (p *PolicyChangedPusher) EnsureDurableCommand(ctx context.Context, agentID 
 	return true
 }
 
-func (p *PolicyChangedPusher) retireSupersededPolicyPushCommands(agentID string, policyID string, storageID string, policyUpdatedAt time.Time) {
+func (p *PolicyChangedPusher) retireSupersededPolicyPushCommands(agentID string, policyID string, storageID string, policyUpdatedAt time.Time, now time.Time) {
 	if p == nil || p.DB == nil || p.DB.DB == nil || agentID == "" || policyID == "" || storageID == "" || policyUpdatedAt.IsZero() {
 		return
 	}
@@ -113,7 +114,7 @@ func (p *PolicyChangedPusher) retireSupersededPolicyPushCommands(agentID string,
 		Updates(map[string]any{
 			"status":        commands.CommandStatusFailed,
 			"error_message": "superseded by newer policy version",
-			"completed_at":  time.Now(),
+			"completed_at":  now,
 		})
 	if result.Error != nil {
 		log.Printf("retire superseded policy commands for agent %s failed: %v", agentID, result.Error)
@@ -151,7 +152,7 @@ func (p *PolicyChangedPusher) lookupDirectMessage(agentID string) (*protocol.Mes
 	return p.lookupMessage(agentID)
 }
 
-func (p *PolicyChangedPusher) hasActivePolicyPushCommand(agentID string, policyID string, storageID string, policyUpdatedAt time.Time) bool {
+func (p *PolicyChangedPusher) hasActivePolicyPushCommand(agentID string, policyID string, storageID string, policyUpdatedAt time.Time, now time.Time) bool {
 	if p == nil || p.DB == nil || p.DB.DB == nil || agentID == "" || policyID == "" || storageID == "" {
 		return false
 	}
@@ -164,7 +165,8 @@ func (p *PolicyChangedPusher) hasActivePolicyPushCommand(agentID string, policyI
 			policyID,
 			storageID,
 			[]string{commands.CommandStatusPending, commands.CommandStatusDispatched, commands.CommandStatusRunning},
-		)
+		).
+		Where("(deadline_at IS NULL OR deadline_at > ?)", now)
 	if !policyUpdatedAt.IsZero() {
 		query = query.Where("policy_updated_at = ?", policyUpdatedAt)
 	}
@@ -173,6 +175,13 @@ func (p *PolicyChangedPusher) hasActivePolicyPushCommand(agentID string, policyI
 		return false
 	}
 	return count > 0
+}
+
+func (p *PolicyChangedPusher) now() time.Time {
+	if p != nil && p.Commands != nil && p.Commands.Now != nil {
+		return p.Commands.Now()
+	}
+	return time.Now()
 }
 
 func eventAction(payload any) string {

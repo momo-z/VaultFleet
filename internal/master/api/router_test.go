@@ -348,6 +348,52 @@ func TestPolicyChangedPusherDoesNotDuplicateActivePolicyPushCommand(t *testing.T
 	assert.Len(t, hub.sent, 1)
 }
 
+func TestPolicyChangedPusherIgnoresExpiredActivePolicyPushCommand(t *testing.T) {
+	database := newRouterAssemblyDatabase(t)
+	agent, storage := createRouterAssemblyPolicyFixtures(t, database)
+	policy := createStorageTestPolicy(t, database, agent.ID, storage.ID, false)
+	hub := &fakeCommandHub{online: map[string]bool{agent.ID: true}}
+	tracker := NewPolicyPushTracker()
+	now := time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
+	commandService := commands.NewService(database, hub)
+	commandService.Now = func() time.Time { return now.Add(-10 * time.Minute) }
+
+	current, ok := CurrentPolicyCommandLookupWithTracker(database, tracker)(agent.ID)
+	require.True(t, ok)
+	require.NotNil(t, current)
+	_, err := commandService.CreateCommand(context.Background(), commands.CreateCommandInput{
+		AgentID:         agent.ID,
+		Type:            protocol.TypePolicyPush,
+		Message:         *current.Message,
+		PolicyID:        current.PolicyID,
+		PolicyUpdatedAt: &current.PolicyUpdatedAt,
+		StorageID:       current.StorageID,
+	})
+	require.NoError(t, err)
+	commandService.Now = func() time.Time { return now }
+
+	pusher := NewPolicyChangedPusher(database, hub, nil)
+	pusher.CommandLookup = CurrentPolicyCommandLookupWithTracker(database, tracker)
+	pusher.Commands = commandService
+
+	require.True(t, pusher.EnsureDurableCommand(context.Background(), agent.ID))
+
+	var commandCount int64
+	require.NoError(t, database.DB.Model(&db.AgentCommand{}).
+		Where("agent_id = ? AND type = ? AND policy_id = ? AND storage_id = ?", agent.ID, protocol.TypePolicyPush, policy.ID, storage.ID).
+		Count(&commandCount).Error)
+	assert.Equal(t, int64(2), commandCount)
+
+	var latest db.AgentCommand
+	require.NoError(t, database.DB.
+		Where("agent_id = ? AND type = ? AND policy_id = ? AND storage_id = ?", agent.ID, protocol.TypePolicyPush, policy.ID, storage.ID).
+		Order("deadline_at DESC").
+		First(&latest).Error)
+	require.NotNil(t, latest.DeadlineAt)
+	assert.True(t, latest.DeadlineAt.After(now))
+	assert.Equal(t, commands.CommandStatusPending, latest.Status)
+}
+
 func TestPolicyChangedPusherDoesNotDuplicateConcurrentActivePolicyPushCommands(t *testing.T) {
 	database := newRouterAssemblyDatabase(t)
 	agent, storage := createRouterAssemblyPolicyFixtures(t, database)
