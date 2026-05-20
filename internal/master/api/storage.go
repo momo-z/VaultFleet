@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -12,20 +13,27 @@ import (
 
 	"vaultfleet/internal/master/db"
 	"vaultfleet/internal/master/events"
+	"vaultfleet/internal/master/storagecheck"
 )
 
 type ConfigHandler struct {
-	DB        *db.Database
-	EventBus  *events.Bus
-	MasterKey []byte
+	DB            *db.Database
+	EventBus      *events.Bus
+	MasterKey     []byte
+	StorageTester StorageTester
 
 	markReferencedPoliciesUnsyncedFunc func(*gorm.DB, string) ([]string, error)
 }
 
+type StorageTester interface {
+	Test(ctx context.Context, request storagecheck.Request) storagecheck.Result
+}
+
 func NewConfigHandler(database *db.Database) *ConfigHandler {
 	return &ConfigHandler{
-		DB:        database,
-		MasterKey: database.MasterKey,
+		DB:            database,
+		MasterKey:     database.MasterKey,
+		StorageTester: storagecheck.NewService(nil),
 	}
 }
 
@@ -41,6 +49,11 @@ type updateStorageRequest struct {
 	RcloneConfig map[string]any `json:"rclone_config"`
 }
 
+type testStorageRequest struct {
+	RcloneType   string         `json:"rclone_type" binding:"required"`
+	RcloneConfig map[string]any `json:"rclone_config" binding:"required"`
+}
+
 type storageResponse struct {
 	ID           string         `json:"id"`
 	Name         string         `json:"name"`
@@ -51,10 +64,12 @@ type storageResponse struct {
 
 func RegisterStorageRoutes(rg *gin.RouterGroup, h *ConfigHandler) {
 	rg.POST("/storage", h.CreateStorage)
+	rg.POST("/storage/test", h.TestUnsavedStorage)
 	rg.GET("/storage", h.ListStorage)
 	rg.GET("/storage/:id", h.GetStorage)
 	rg.PUT("/storage/:id", h.UpdateStorage)
 	rg.DELETE("/storage/:id", h.DeleteStorage)
+	rg.POST("/storage/:id/test", h.TestSavedStorage)
 }
 
 func (h *ConfigHandler) CreateStorage(c *gin.Context) {
@@ -178,6 +193,49 @@ func (h *ConfigHandler) DeleteStorage(c *gin.Context) {
 	}
 
 	c.Status(http.StatusNoContent)
+}
+
+func (h *ConfigHandler) TestUnsavedStorage(c *gin.Context) {
+	var request testStorageRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+
+	config, ok := stringifyRcloneConfig(c, request.RcloneConfig)
+	if !ok {
+		return
+	}
+
+	result := h.storageTester().Test(c.Request.Context(), storagecheck.Request{
+		RcloneType:   request.RcloneType,
+		RcloneConfig: config,
+	})
+	writeDataResponse(c, http.StatusOK, result)
+}
+
+func (h *ConfigHandler) TestSavedStorage(c *gin.Context) {
+	storage, ok := h.findStorageByID(c, c.Param("id"))
+	if !ok {
+		return
+	}
+
+	rawConfig, err := h.decryptMap(storage.RcloneConfig)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "decrypt storage config"})
+		return
+	}
+
+	config, ok := stringifyRcloneConfig(c, rawConfig)
+	if !ok {
+		return
+	}
+
+	result := h.storageTester().Test(c.Request.Context(), storagecheck.Request{
+		RcloneType:   storage.RcloneType,
+		RcloneConfig: config,
+	})
+	writeDataResponse(c, http.StatusOK, result)
 }
 
 func (h *ConfigHandler) storageHasPolicies(c *gin.Context, storageID string) (bool, bool) {
@@ -350,6 +408,26 @@ func (h *ConfigHandler) preserveRedactedSecrets(currentCiphertext string, nextCo
 	}
 
 	return merged, nil
+}
+
+func (h *ConfigHandler) storageTester() StorageTester {
+	if h.StorageTester != nil {
+		return h.StorageTester
+	}
+	return storagecheck.NewService(nil)
+}
+
+func stringifyRcloneConfig(c *gin.Context, config map[string]any) (map[string]string, bool) {
+	result := make(map[string]string, len(config))
+	for key, value := range config {
+		stringValue, ok := value.(string)
+		if !ok {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "rclone config values must be strings"})
+			return nil, false
+		}
+		result[key] = stringValue
+	}
+	return result, true
 }
 
 const redactedSecretValue = "[redacted]"

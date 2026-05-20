@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -15,12 +16,23 @@ import (
 
 	"vaultfleet/internal/master/db"
 	"vaultfleet/internal/master/events"
+	"vaultfleet/internal/master/storagecheck"
 )
 
 type testConfigSetup struct {
 	database *db.Database
 	bus      *events.Bus
 	router   *gin.Engine
+}
+
+type fakeStorageTester struct {
+	result   storagecheck.Result
+	requests []storagecheck.Request
+}
+
+func (t *fakeStorageTester) Test(_ context.Context, request storagecheck.Request) storagecheck.Result {
+	t.requests = append(t.requests, request)
+	return t.result
 }
 
 func setupTestConfigAPI(t *testing.T) testConfigSetup {
@@ -120,6 +132,94 @@ func TestStorageResponsesRedactSecretFields(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, plaintext, "SECRET456")
 	assert.Contains(t, plaintext, "AKID123")
+}
+
+func TestStorageTestUnsavedConfigDoesNotPersistAndReturnsResult(t *testing.T) {
+	setup := setupTestConfigAPI(t)
+	tester := &fakeStorageTester{
+		result: storagecheck.Result{
+			OK:        true,
+			LatencyMs: 12,
+			CheckedAt: time.Date(2026, 5, 21, 10, 0, 0, 0, time.UTC),
+		},
+	}
+	handler := NewConfigHandler(setup.database)
+	handler.StorageTester = tester
+	router := gin.New()
+	api := router.Group("/api")
+	RegisterStorageRoutes(api, handler)
+
+	w := postAnyJSON(t, router, "/api/storage/test", map[string]any{
+		"rclone_type": "s3",
+		"rclone_config": map[string]any{
+			"provider":          "Cloudflare",
+			"secret_access_key": "SECRET456",
+		},
+	})
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	body := parseJSON(t, w)
+	data := requireMap(t, body["data"])
+	assert.Equal(t, true, data["ok"])
+	assert.Equal(t, float64(12), data["latency_ms"])
+
+	var count int64
+	require.NoError(t, setup.database.DB.Model(&db.StorageConfig{}).Count(&count).Error)
+	assert.Equal(t, int64(0), count)
+
+	require.Len(t, tester.requests, 1)
+	assert.Equal(t, "s3", tester.requests[0].RcloneType)
+	assert.Equal(t, "SECRET456", tester.requests[0].RcloneConfig["secret_access_key"])
+}
+
+func TestStorageTestSavedConfigDecryptsConfig(t *testing.T) {
+	setup := setupTestConfigAPI(t)
+	tester := &fakeStorageTester{
+		result: storagecheck.Result{
+			OK:        true,
+			LatencyMs: 12,
+			CheckedAt: time.Date(2026, 5, 21, 10, 0, 0, 0, time.UTC),
+		},
+	}
+	handler := NewConfigHandler(setup.database)
+	handler.StorageTester = tester
+	router := gin.New()
+	api := router.Group("/api")
+	RegisterStorageRoutes(api, handler)
+	created := createStorageConfig(t, setup.router, "Cloudflare R2", map[string]any{
+		"provider":          "Cloudflare",
+		"secret_access_key": "SECRET456",
+	})
+
+	w := postAnyJSON(t, router, "/api/storage/"+created["id"].(string)+"/test", nil)
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.Len(t, tester.requests, 1)
+	assert.Equal(t, "s3", tester.requests[0].RcloneType)
+	assert.Equal(t, "SECRET456", tester.requests[0].RcloneConfig["secret_access_key"])
+}
+
+func TestStorageTestUnsavedConfigRejectsNonStringValues(t *testing.T) {
+	setup := setupTestConfigAPI(t)
+	tester := &fakeStorageTester{}
+	handler := NewConfigHandler(setup.database)
+	handler.StorageTester = tester
+	router := gin.New()
+	api := router.Group("/api")
+	RegisterStorageRoutes(api, handler)
+
+	w := postAnyJSON(t, router, "/api/storage/test", map[string]any{
+		"rclone_type": "s3",
+		"rclone_config": map[string]any{
+			"provider": "Cloudflare",
+			"chunk":    12,
+		},
+	})
+
+	require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+	body := parseJSON(t, w)
+	assert.Equal(t, "rclone config values must be strings", body["error"])
+	assert.Empty(t, tester.requests)
 }
 
 func TestCreateStorageConfigValidatesRequiredFields(t *testing.T) {
