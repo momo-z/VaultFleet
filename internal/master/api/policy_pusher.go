@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"log"
+	"sync"
 	"time"
 
 	"vaultfleet/internal/master/commands"
@@ -25,6 +26,7 @@ type PolicyChangedPusher struct {
 	Lookup        PolicyLookupFunc
 	CommandLookup PolicyCommandLookupFunc
 	Commands      *commands.Service
+	mu            sync.Mutex
 }
 
 func NewPolicyChangedPusher(database *db.Database, hub PolicyPusherHub, lookup PolicyLookupFunc) *PolicyChangedPusher {
@@ -70,6 +72,9 @@ func (p *PolicyChangedPusher) EnsureDurableCommand(ctx context.Context, agentID 
 	if p == nil || p.Commands == nil || agentID == "" {
 		return false
 	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	current, ok := p.lookupCommand(agentID)
 	if !ok || current == nil || current.Message == nil {
 		return false

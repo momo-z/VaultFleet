@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -345,6 +346,46 @@ func TestPolicyChangedPusherDoesNotDuplicateActivePolicyPushCommand(t *testing.T
 		Count(&commandCount).Error)
 	assert.Equal(t, int64(1), commandCount)
 	assert.Len(t, hub.sent, 1)
+}
+
+func TestPolicyChangedPusherDoesNotDuplicateConcurrentActivePolicyPushCommands(t *testing.T) {
+	database := newRouterAssemblyDatabase(t)
+	agent, storage := createRouterAssemblyPolicyFixtures(t, database)
+	policy := createStorageTestPolicy(t, database, agent.ID, storage.ID, false)
+	hub := &fakeCommandHub{online: map[string]bool{agent.ID: true}}
+	tracker := NewPolicyPushTracker()
+
+	commandService := commands.NewService(database, hub)
+	pusher := NewPolicyChangedPusher(database, hub, CurrentPolicyLookupWithTracker(database, tracker))
+	pusher.CommandLookup = CurrentPolicyCommandLookupWithTracker(database, tracker)
+	pusher.Commands = commandService
+	event := events.Event{
+		Type: events.PolicyChanged,
+		Payload: map[string]interface{}{
+			"agent_id": agent.ID,
+			"action":   "updated",
+		},
+	}
+
+	var start sync.WaitGroup
+	start.Add(1)
+	var workers sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			start.Wait()
+			pusher.Handle(event)
+		}()
+	}
+	start.Done()
+	workers.Wait()
+
+	var commandCount int64
+	require.NoError(t, database.DB.Model(&db.AgentCommand{}).
+		Where("agent_id = ? AND type = ? AND policy_id = ? AND storage_id = ?", agent.ID, protocol.TypePolicyPush, policy.ID, storage.ID).
+		Count(&commandCount).Error)
+	assert.Equal(t, int64(1), commandCount)
 }
 
 func TestPolicyChangedPusherCommandRefsMatchPolicyPayloadAndTrackerMessage(t *testing.T) {
