@@ -90,6 +90,43 @@ func TestRouterAssemblySessionCookieAccessesProtectedRoute(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 }
 
+func TestRouterAssemblySnapshotRefreshQueuesDurableCommand(t *testing.T) {
+	setup := setupRouterAssembly(t)
+
+	initResponse := postJSON(t, setup.router, "/api/auth/init", map[string]string{
+		"username": "admin",
+		"password": "secret123",
+	})
+	require.Equal(t, http.StatusOK, initResponse.Code, initResponse.Body.String())
+	cookie := getSessionCookie(t, initResponse)
+
+	agent := db.Agent{Name: "Snapshot Router Agent", Status: "offline"}
+	require.NoError(t, setup.database.DB.Create(&agent).Error)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/agents/"+agent.ID+"/snapshots/refresh", nil)
+	req.AddCookie(cookie)
+	w := httptest.NewRecorder()
+	setup.router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusAccepted, w.Code, w.Body.String())
+	body := parseJSON(t, w)
+	assert.Equal(t, true, body["ok"])
+	data := requireMap(t, body["data"])
+	commandID, ok := data["command_id"].(string)
+	require.True(t, ok)
+	assert.NotEmpty(t, commandID)
+	messageID, ok := data["message_id"].(string)
+	require.True(t, ok)
+	assert.NotEmpty(t, messageID)
+
+	var command db.AgentCommand
+	require.NoError(t, setup.database.DB.First(&command, "id = ?", commandID).Error)
+	assert.Equal(t, agent.ID, command.AgentID)
+	assert.Equal(t, protocol.TypeSnapshotListReq, command.Type)
+	assert.Equal(t, commands.CommandStatusPending, command.Status)
+	assert.Equal(t, messageID, command.MessageID)
+}
+
 func TestRouterAssemblyFrontendFallback(t *testing.T) {
 	setup := setupRouterAssembly(t)
 

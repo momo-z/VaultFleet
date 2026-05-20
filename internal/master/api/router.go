@@ -127,6 +127,7 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 	policyHandler := NewPolicyHandler(cfg.Database, cfg.EventBus)
 	browseHandler := NewBrowseHandler(cfg.Database, cfg.Hub)
 	snapshotHandler := NewSnapshotHandler(cfg.Database, cfg.Hub)
+	snapshotHandler.Commands = commandService
 	restoreHandler := NewRestoreHandler(cfg.Database, cfg.Hub)
 	restoreHandler.Commands = commandService
 	taskHandler := NewTaskHandler(cfg.Database, cfg.Hub)
