@@ -17,6 +17,7 @@ import { zhCN } from "date-fns/locale";
 import { cn } from "@/lib/utils";
 import { ErrorPanel } from "@/components/error-panel";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { toast } from "sonner";
 
 export function SnapshotsPage() {
   const navigate = useNavigate();
@@ -38,16 +39,29 @@ export function SnapshotsPage() {
 
   const refreshMutation = useMutation({
     mutationFn: () => refreshSnapshots(agentId),
-    onSuccess: () => {
+    onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["snapshots", agentId] });
+      if (data.message === "snapshot refresh queued") {
+        toast.info("快照刷新已排队", { description: "Agent 离线，上线后将自动执行" });
+      } else {
+        toast.success("快照列表刷新成功");
+      }
     },
+    onError: (error: any) => {
+      toast.error("刷新快照失败", { description: error.message });
+    }
   });
 
   const restoreMutation = useMutation({
     mutationFn: (data: { snapshot_id: string; target_path: string }) => restoreSnapshot(agentId, data),
     onSuccess: (data) => {
       setRestoreSuccessId(data.message_id);
+      const msg = data.message === "restore queued" ? "恢复命令已排队" : "恢复任务已开始";
+      toast.success(msg);
     },
+    onError: (error: any) => {
+      toast.error("发起恢复失败", { description: error.message });
+    }
   });
 
   const handleAgentChange = (val: string) => {
@@ -95,7 +109,7 @@ export function SnapshotsPage() {
           <Button 
             variant="outline" 
             size="icon" 
-            disabled={!agentId || isFetching || refreshMutation.isPending || currentAgent?.status !== "online"}
+            disabled={!agentId || isFetching || refreshMutation.isPending}
             onClick={() => refreshMutation.mutate()}
             title="请求 Agent 刷新快照列表"
           >
