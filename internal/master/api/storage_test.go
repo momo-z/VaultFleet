@@ -940,7 +940,7 @@ func TestListProviders(t *testing.T) {
 	assert.Equal(t, "Minio", second["value"])
 }
 
-func TestListProvidersRcloneUnavailable(t *testing.T) {
+func TestListProvidersRcloneUnavailableReturnsFallback(t *testing.T) {
 	setup := setupTestConfigAPI(t)
 	handler := NewConfigHandler(setup.database)
 	handler.ProviderLoader = &storagecheck.ProviderLoader{
@@ -958,5 +958,7 @@ func TestListProvidersRcloneUnavailable(t *testing.T) {
 	body := parseJSON(t, w)
 	assert.Equal(t, true, body["ok"])
 	list := requireList(t, body["data"])
-	assert.Empty(t, list)
+	require.NotEmpty(t, list)
+	first := requireMap(t, list[0])
+	assert.Equal(t, "AWS", first["value"])
 }

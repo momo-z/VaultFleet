@@ -122,7 +122,7 @@ func TestLoadS3ProvidersCachesResult(t *testing.T) {
 	assert.Equal(t, 1, callCount)
 }
 
-func TestLoadS3ProvidersRunError(t *testing.T) {
+func TestLoadS3ProvidersRunErrorReturnsFallback(t *testing.T) {
 	loader := &ProviderLoader{
 		RunFunc: func() ([]byte, error) {
 			return nil, assert.AnError
@@ -130,8 +130,10 @@ func TestLoadS3ProvidersRunError(t *testing.T) {
 	}
 
 	providers, err := loader.Load()
-	require.Error(t, err)
-	assert.Nil(t, providers)
+	require.NoError(t, err)
+	require.NotEmpty(t, providers)
+	assert.Equal(t, "AWS", providers[0].Value)
+	assert.Equal(t, "Other", providers[len(providers)-1].Value)
 }
 
 func TestNewProviderLoaderDefaultRunFunc(t *testing.T) {
