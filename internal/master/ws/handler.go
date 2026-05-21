@@ -34,6 +34,7 @@ type Handler struct {
 	SnapshotListResponseProcessor SnapshotListResponseProcessorFunc
 	PendingCommandDispatcher      PendingCommandDispatcherFunc
 	AgentStateUpdater             func(agentID string, status string, lastSeenAt *time.Time) error
+	HeartbeatStateUpdater         func(agentID string, status string, lastSeenAt *time.Time, heartbeat *protocol.HeartbeatPayload) error
 	upgrader                      websocket.Upgrader
 	now                           func() time.Time
 	pongWait                      time.Duration
@@ -141,6 +142,12 @@ func (h *Handler) dispatch(agentID string, msg protocol.Message) {
 		h.hub.UpdateLastSeen(agentID, now)
 		h.hub.MarkOnline(agentID)
 		h.updateAgentState(agentID, "online", &now)
+		if h.HeartbeatStateUpdater != nil {
+			heartbeat, err := protocol.ParsePayload[protocol.HeartbeatPayload](&msg)
+			if err == nil && heartbeat.AgentVersion != "" {
+				_ = h.HeartbeatStateUpdater(agentID, "online", &now, heartbeat)
+			}
+		}
 	case protocol.TypePolicyAck:
 		if h.PolicyAckProcessor != nil {
 			if err := h.PolicyAckProcessor(agentID, msg); err != nil {

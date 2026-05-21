@@ -128,6 +128,7 @@ func buildRuntimeWithOptions(ctx context.Context, database *db.Database, options
 		return commandService.DispatchPendingForAgent(ctx, agentID, 20)
 	}
 	wsHandler.AgentStateUpdater = api.NewAgentStateUpdater(database)
+	wsHandler.HeartbeatStateUpdater = api.NewHeartbeatStateUpdater(database)
 	go commandService.RunTimeoutScanner(ctx, options.commandTimeoutScanInterval)
 	bus.Subscribe(events.PolicyChanged, policyPusher.Handle)
 	router := api.NewRouter(api.RouterConfig{
