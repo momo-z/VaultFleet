@@ -126,6 +126,7 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 	agentHandler := NewAgentHandler(cfg.Database)
 	storageHandler := NewConfigHandler(cfg.Database)
 	storageHandler.EventBus = cfg.EventBus
+	storageHandler.ProviderLoader = storagecheck.NewProviderLoader()
 	policyHandler := NewPolicyHandler(cfg.Database, cfg.EventBus)
 	browseHandler := NewBrowseHandler(cfg.Database, cfg.Hub)
 	snapshotHandler := NewSnapshotHandler(cfg.Database, cfg.Hub)

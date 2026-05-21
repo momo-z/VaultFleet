@@ -902,3 +902,61 @@ func assertNoPolicyChangedEvent(t *testing.T, received <-chan events.Event) {
 	case <-time.After(25 * time.Millisecond):
 	}
 }
+
+func TestListProviders(t *testing.T) {
+	setup := setupTestConfigAPI(t)
+	handler := NewConfigHandler(setup.database)
+	handler.ProviderLoader = &storagecheck.ProviderLoader{
+		RunFunc: func() ([]byte, error) {
+			return []byte(`{
+				"providers": [{
+					"Name": "s3",
+					"Options": [{
+						"Name": "provider",
+						"Examples": [
+							{"Value": "AWS", "Help": "Amazon Web Services"},
+							{"Value": "Minio", "Help": "Minio Object Storage"}
+						]
+					}]
+				}]
+			}`), nil
+		},
+	}
+	router := gin.New()
+	api := router.Group("/api")
+	RegisterStorageRoutes(api, handler)
+
+	w := getJSON(t, router, "/api/storage/providers")
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	body := parseJSON(t, w)
+	assert.Equal(t, true, body["ok"])
+	list := requireList(t, body["data"])
+	require.Len(t, list, 2)
+	first := requireMap(t, list[0])
+	assert.Equal(t, "AWS", first["value"])
+	assert.Equal(t, "Amazon Web Services", first["help"])
+	second := requireMap(t, list[1])
+	assert.Equal(t, "Minio", second["value"])
+}
+
+func TestListProvidersRcloneUnavailable(t *testing.T) {
+	setup := setupTestConfigAPI(t)
+	handler := NewConfigHandler(setup.database)
+	handler.ProviderLoader = &storagecheck.ProviderLoader{
+		RunFunc: func() ([]byte, error) {
+			return nil, assert.AnError
+		},
+	}
+	router := gin.New()
+	api := router.Group("/api")
+	RegisterStorageRoutes(api, handler)
+
+	w := getJSON(t, router, "/api/storage/providers")
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	body := parseJSON(t, w)
+	assert.Equal(t, true, body["ok"])
+	list := requireList(t, body["data"])
+	assert.Empty(t, list)
+}

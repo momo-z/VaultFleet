@@ -16,10 +16,11 @@ import (
 )
 
 type ConfigHandler struct {
-	DB            *db.Database
-	EventBus      *events.Bus
-	MasterKey     []byte
-	StorageTester StorageTester
+	DB             *db.Database
+	EventBus       *events.Bus
+	MasterKey      []byte
+	StorageTester  StorageTester
+	ProviderLoader *storagecheck.ProviderLoader
 
 	markReferencedPoliciesUnsyncedFunc func(*gorm.DB, string) ([]string, error)
 }
@@ -62,6 +63,7 @@ type storageResponse struct {
 }
 
 func RegisterStorageRoutes(rg *gin.RouterGroup, h *ConfigHandler) {
+	rg.GET("/storage/providers", h.ListProviders)
 	rg.POST("/storage", h.CreateStorage)
 	rg.POST("/storage/test", h.TestUnsavedStorage)
 	rg.GET("/storage", h.ListStorage)
@@ -280,6 +282,19 @@ func (h *ConfigHandler) TestSavedStorage(c *gin.Context) {
 		RcloneConfig: config,
 	})
 	writeStorageTestResult(c, http.StatusOK, result)
+}
+
+func (h *ConfigHandler) ListProviders(c *gin.Context) {
+	if h.ProviderLoader == nil {
+		writeDataResponse(c, http.StatusOK, []storagecheck.S3Provider{})
+		return
+	}
+	providers, err := h.ProviderLoader.Load()
+	if err != nil {
+		writeDataResponse(c, http.StatusOK, []storagecheck.S3Provider{})
+		return
+	}
+	writeDataResponse(c, http.StatusOK, providers)
 }
 
 func writeStorageTestResult(c *gin.Context, status int, result storagecheck.Result) {
