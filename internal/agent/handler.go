@@ -35,6 +35,7 @@ type HandlerConfig struct {
 	BrowseFunc         BrowseFunc
 	ConfigDir          string
 	AgentID            string
+	LogFile            string
 	Scheduler          policyScheduler
 	BackupRunner       BackupRunnerFunc
 	RestoreRunner      RestoreRunnerFunc
@@ -47,6 +48,7 @@ type Handler struct {
 	browse             BrowseFunc
 	configDir          string
 	agentID            string
+	logFile            string
 	scheduler          policyScheduler
 	backupRunner       BackupRunnerFunc
 	restoreRunner      RestoreRunnerFunc
@@ -90,6 +92,7 @@ func NewHandler(config HandlerConfig) *Handler {
 		browse:             browse,
 		configDir:          configDir,
 		agentID:            config.AgentID,
+		logFile:            config.LogFile,
 		scheduler:          policyScheduler,
 		backupRunner:       runner,
 		restoreRunner:      restoreRunner,
@@ -109,6 +112,8 @@ func (h *Handler) Handle(msg protocol.Message) {
 		h.handleRestoreReq(msg)
 	case protocol.TypeSnapshotListReq:
 		h.handleSnapshotListReq(msg)
+	case protocol.TypeCollectLogsReq:
+		h.handleCollectLogsReq(msg)
 	}
 }
 
@@ -745,6 +750,30 @@ func (h *Handler) sendSnapshotListResp(messageID string, agentID string, snapsho
 	msg.ID = messageID
 	if err := h.sendMessage(*msg); err != nil {
 		log.Printf("send snapshot list response failed: %v", err)
+	}
+}
+
+func (h *Handler) handleCollectLogsReq(msg protocol.Message) {
+	req, err := protocol.ParsePayload[protocol.CollectLogsReqPayload](&msg)
+	maxBytes := 5 * 1024 * 1024
+	if err == nil && req.MaxBytes > 0 && req.MaxBytes < maxBytes {
+		maxBytes = req.MaxBytes
+	}
+
+	logFile := h.logFile
+	if logFile == "" {
+		logFile = defaultLogFile
+	}
+	resp, err := protocol.NewMessage(protocol.TypeCollectLogsResp, protocol.CollectLogsRespPayload{
+		Logs: collectLogs(logFile, maxBytes),
+	})
+	if err != nil {
+		log.Printf("create collect_logs response failed: %v", err)
+		return
+	}
+	resp.ID = msg.ID
+	if err := h.sendMessage(*resp); err != nil {
+		log.Printf("send collect_logs response failed: %v", err)
 	}
 }
 
