@@ -14,6 +14,7 @@ import (
 	"vaultfleet/internal/master/commands"
 	"vaultfleet/internal/master/db"
 	"vaultfleet/internal/master/events"
+	"vaultfleet/internal/master/logbuf"
 	"vaultfleet/internal/master/storagecheck"
 	"vaultfleet/pkg/protocol"
 )
@@ -33,6 +34,7 @@ type RouterConfig struct {
 	EventBus       *events.Bus
 	AgentWebSocket gin.HandlerFunc
 	Version        string
+	LogBuf         *logbuf.RingBuffer
 }
 
 type PolicyPushTracker struct {
@@ -140,6 +142,8 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 	notificationHandler := NewNotificationHandler(cfg.Database)
 	systemHandler := NewSystemHandler(cfg.Database)
 	systemHandler.Version = cfg.Version
+	diagnosticHandler := NewDiagnosticHandler(cfg.Database, cfg.Hub, cfg.LogBuf)
+	diagnosticHandler.Version = cfg.Version
 	healthHandler := NewHealthHandler(cfg.Database, cfg.Hub)
 
 	public := r.Group("/api")
@@ -172,6 +176,7 @@ func NewRouter(cfg RouterConfig) *gin.Engine {
 	RegisterCommandRoutes(protected, commandHandler)
 	RegisterNotificationRoutes(protected, notificationHandler)
 	RegisterSystemRoutes(protected.Group("/system"), systemHandler)
+	RegisterDiagnosticRoutes(protected.Group("/system"), diagnosticHandler)
 
 	RegisterDownloadRoutes(r, cfg.Database.DataDir)
 	RegisterHealthRoutes(r, healthHandler)
