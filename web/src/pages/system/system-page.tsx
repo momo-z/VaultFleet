@@ -2,15 +2,19 @@ import { useState, useRef } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { changePassword, exportSystemData, importSystemData, confirmImport, ImportValidationResult, getSystemVersion } from "@/services/system";
 import { checkHealth, checkReady } from "@/services/health";
+import { listAgents } from "@/services/agents";
+import { downloadDiagnosticBundle } from "@/services/diagnostic";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle, CardFooter } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { ErrorPanel } from "@/components/error-panel";
-import { Download, ShieldCheck, CheckCircle2, Activity, Server, Database, KeyRound, FolderTree, AlertCircle, RefreshCw, Upload, ExternalLink } from "lucide-react";
+import { Download, ShieldCheck, CheckCircle2, Activity, Server, Database, KeyRound, FolderTree, AlertCircle, RefreshCw, Upload, ExternalLink, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { StatusBadge } from "@/components/status-badge";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import type { Agent } from "@/types/agent";
 
 export function SystemPage() {
   const [currentPassword, setCurrentPassword] = useState("");
@@ -19,6 +23,7 @@ export function SystemPage() {
   const [passwordSuccess, setPasswordSuccess] = useState(false);
   const [importResult, setImportResult] = useState<ImportValidationResult | null>(null);
   const [showImportConfirm, setShowImportConfirm] = useState(false);
+  const [selectedAgents, setSelectedAgents] = useState<string[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const { data: healthStatus, refetch: refetchHealth, isFetching: healthFetching } = useQuery({
@@ -36,6 +41,11 @@ export function SystemPage() {
   const { data: versionInfo } = useQuery({
     queryKey: ["system-version"],
     queryFn: getSystemVersion,
+  });
+
+  const { data: agents = [] } = useQuery({
+    queryKey: ["agents"],
+    queryFn: listAgents,
   });
 
   const passwordMutation = useMutation({
@@ -108,6 +118,24 @@ export function SystemPage() {
     },
   });
 
+  const diagnosticMutation = useMutation({
+    mutationFn: downloadDiagnosticBundle,
+    onSuccess: (blob) => {
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `vaultfleet-diagnostic-${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+      toast.success("诊断包已生成");
+    },
+    onError: (error: any) => {
+      toast.error("生成诊断包失败", { description: error.message });
+    },
+  });
+
   const handleImportClick = () => {
     fileInputRef.current?.click();
   };
@@ -127,6 +155,12 @@ export function SystemPage() {
       return;
     }
     passwordMutation.mutate({ current_password: currentPassword, new_password: newPassword });
+  };
+
+  const toggleAgent = (id: string) => {
+    setSelectedAgents((prev) => (
+      prev.includes(id) ? prev.filter((agentID) => agentID !== id) : [...prev, id]
+    ));
   };
 
   const isRefreshing = healthFetching || readyFetching;
@@ -327,6 +361,54 @@ export function SystemPage() {
           </CardFooter>
         </Card>
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg">诊断包</CardTitle>
+          <CardDescription>收集系统状态和日志，用于问题排查。</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {agents.length > 0 && (
+            <div className="space-y-2">
+              <p className="text-sm text-muted-foreground">选择需要收集日志的 Agent（可选）：</p>
+              {agents.map((agent: Agent) => (
+                <label key={agent.id} className="flex items-center gap-2 text-sm">
+                  <Checkbox
+                    checked={selectedAgents.includes(agent.id)}
+                    onCheckedChange={() => toggleAgent(agent.id)}
+                    disabled={agent.status !== "online" || diagnosticMutation.isPending}
+                  />
+                  <span className={agent.status !== "online" ? "text-muted-foreground" : ""}>
+                    {agent.name}
+                  </span>
+                  {agent.status !== "online" && (
+                    <span className="text-xs text-muted-foreground">（离线）</span>
+                  )}
+                </label>
+              ))}
+            </div>
+          )}
+        </CardContent>
+        <CardFooter>
+          <Button
+            variant="outline"
+            onClick={() => diagnosticMutation.mutate(selectedAgents)}
+            disabled={diagnosticMutation.isPending}
+          >
+            {diagnosticMutation.isPending ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                正在生成...
+              </>
+            ) : (
+              <>
+                <Download className="mr-2 h-4 w-4" />
+                生成诊断包
+              </>
+            )}
+          </Button>
+        </CardFooter>
+      </Card>
 
       <Card>
         <CardHeader>
