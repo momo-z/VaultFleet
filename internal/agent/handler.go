@@ -20,8 +20,9 @@ type SendFunc func(protocol.Message) error
 type BrowseFunc func(fsRoot string, scanPath string, maxDepth int) ([]protocol.DirEntry, error)
 
 type BackupRunnerFunc func(context.Context, executor.ExecutorConfig) executor.TaskResult
-type RestoreRunnerFunc func(context.Context, executor.ExecutorConfig, string, string) error
+type RestoreRunnerFunc func(context.Context, executor.ExecutorConfig, string, string, []string) error
 type SnapshotListRunnerFunc func(context.Context, executor.ExecutorConfig) ([]executor.SnapshotInfo, error)
+type SnapshotBrowseRunnerFunc func(context.Context, executor.ExecutorConfig, string) ([]executor.SnapshotFileEntry, error)
 
 type policyScheduler interface {
 	Validate(schedule string) error
@@ -30,31 +31,33 @@ type policyScheduler interface {
 }
 
 type HandlerConfig struct {
-	PolicyStore        *policy.Store
-	SendFunc           SendFunc
-	BrowseFunc         BrowseFunc
-	ConfigDir          string
-	AgentID            string
-	LogFile            string
-	Scheduler          policyScheduler
-	BackupRunner       BackupRunnerFunc
-	RestoreRunner      RestoreRunnerFunc
-	SnapshotListRunner SnapshotListRunnerFunc
+	PolicyStore          *policy.Store
+	SendFunc             SendFunc
+	BrowseFunc           BrowseFunc
+	ConfigDir            string
+	AgentID              string
+	LogFile              string
+	Scheduler            policyScheduler
+	BackupRunner         BackupRunnerFunc
+	RestoreRunner        RestoreRunnerFunc
+	SnapshotListRunner   SnapshotListRunnerFunc
+	SnapshotBrowseRunner SnapshotBrowseRunnerFunc
 }
 
 type Handler struct {
-	policyStore        *policy.Store
-	send               SendFunc
-	browse             BrowseFunc
-	configDir          string
-	agentID            string
-	logFile            string
-	scheduler          policyScheduler
-	backupRunner       BackupRunnerFunc
-	restoreRunner      RestoreRunnerFunc
-	snapshotListRunner SnapshotListRunnerFunc
-	backupMu           sync.Mutex
-	backupRunning      bool
+	policyStore          *policy.Store
+	send                 SendFunc
+	browse               BrowseFunc
+	configDir            string
+	agentID              string
+	logFile              string
+	scheduler            policyScheduler
+	backupRunner         BackupRunnerFunc
+	restoreRunner        RestoreRunnerFunc
+	snapshotListRunner   SnapshotListRunnerFunc
+	snapshotBrowseRunner SnapshotBrowseRunnerFunc
+	backupMu             sync.Mutex
+	backupRunning        bool
 }
 
 func NewHandler(config HandlerConfig) *Handler {
@@ -78,6 +81,10 @@ func NewHandler(config HandlerConfig) *Handler {
 	if snapshotListRunner == nil {
 		snapshotListRunner = runSnapshotList
 	}
+	snapshotBrowseRunner := config.SnapshotBrowseRunner
+	if snapshotBrowseRunner == nil {
+		snapshotBrowseRunner = runSnapshotBrowse
+	}
 	policyScheduler := config.Scheduler
 	if policyScheduler == nil {
 		defaultScheduler := scheduler.New()
@@ -87,16 +94,17 @@ func NewHandler(config HandlerConfig) *Handler {
 		policyScheduler = defaultScheduler
 	}
 	return &Handler{
-		policyStore:        config.PolicyStore,
-		send:               config.SendFunc,
-		browse:             browse,
-		configDir:          configDir,
-		agentID:            config.AgentID,
-		logFile:            config.LogFile,
-		scheduler:          policyScheduler,
-		backupRunner:       runner,
-		restoreRunner:      restoreRunner,
-		snapshotListRunner: snapshotListRunner,
+		policyStore:          config.PolicyStore,
+		send:                 config.SendFunc,
+		browse:               browse,
+		configDir:            configDir,
+		agentID:              config.AgentID,
+		logFile:              config.LogFile,
+		scheduler:            policyScheduler,
+		backupRunner:         runner,
+		restoreRunner:        restoreRunner,
+		snapshotListRunner:   snapshotListRunner,
+		snapshotBrowseRunner: snapshotBrowseRunner,
 	}
 }
 
@@ -112,6 +120,8 @@ func (h *Handler) Handle(msg protocol.Message) {
 		h.handleRestoreReq(msg)
 	case protocol.TypeSnapshotListReq:
 		h.handleSnapshotListReq(msg)
+	case protocol.TypeSnapshotBrowseReq:
+		h.handleSnapshotBrowseReq(msg)
 	case protocol.TypeCollectLogsReq:
 		h.handleCollectLogsReq(msg)
 	}
@@ -624,13 +634,13 @@ func runBackup(ctx context.Context, cfg executor.ExecutorConfig) executor.TaskRe
 	return executor.NewExecutor(cfg).RunBackupJob(ctx)
 }
 
-func runRestore(ctx context.Context, cfg executor.ExecutorConfig, snapshotID string, target string) error {
+func runRestore(ctx context.Context, cfg executor.ExecutorConfig, snapshotID string, target string, includePaths []string) error {
 	runner := executor.ResticRunner{
 		RcloneConfPath: filepath.Join(cfg.ConfigDir, "rclone.conf"),
 		PasswordFile:   filepath.Join(cfg.ConfigDir, ".restic-password"),
 		RepoPath:       cfg.RepoPath,
 	}
-	return runner.RestoreSnapshot(ctx, snapshotID, target)
+	return runner.RestoreSnapshot(ctx, snapshotID, target, includePaths)
 }
 
 func runSnapshotList(ctx context.Context, cfg executor.ExecutorConfig) ([]executor.SnapshotInfo, error) {
@@ -640,6 +650,15 @@ func runSnapshotList(ctx context.Context, cfg executor.ExecutorConfig) ([]execut
 		RepoPath:       cfg.RepoPath,
 	}
 	return runner.ListSnapshots(ctx)
+}
+
+func runSnapshotBrowse(ctx context.Context, cfg executor.ExecutorConfig, snapshotID string) ([]executor.SnapshotFileEntry, error) {
+	runner := executor.ResticRunner{
+		RcloneConfPath: filepath.Join(cfg.ConfigDir, "rclone.conf"),
+		PasswordFile:   filepath.Join(cfg.ConfigDir, ".restic-password"),
+		RepoPath:       cfg.RepoPath,
+	}
+	return runner.LsSnapshot(ctx, snapshotID)
 }
 
 func (h *Handler) handleRestoreReq(msg protocol.Message) {
@@ -667,7 +686,7 @@ func (h *Handler) handleRestoreReq(msg protocol.Message) {
 	}
 
 	h.sendRestoreProgress(msg.ID, agentID, req.SnapshotID)
-	err = h.restoreRunner(context.Background(), executorConfigForPolicy(h.configDir, policyPayload), req.SnapshotID, req.Target)
+	err = h.restoreRunner(context.Background(), executorConfigForPolicy(h.configDir, policyPayload), req.SnapshotID, req.Target, req.IncludePaths)
 	finishedAt := time.Now()
 	result := protocol.TaskResultPayload{
 		AgentID:    agentID,
@@ -750,6 +769,60 @@ func (h *Handler) sendSnapshotListResp(messageID string, agentID string, snapsho
 	msg.ID = messageID
 	if err := h.sendMessage(*msg); err != nil {
 		log.Printf("send snapshot list response failed: %v", err)
+	}
+}
+
+func (h *Handler) handleSnapshotBrowseReq(msg protocol.Message) {
+	req, err := protocol.ParsePayload[protocol.SnapshotBrowseReqPayload](&msg)
+	if err != nil {
+		log.Printf("parse snapshot browse request failed: %v", err)
+		h.sendSnapshotBrowseResp(msg.ID, "", nil, "parse snapshot browse: "+err.Error())
+		return
+	}
+	if h.policyStore == nil {
+		h.sendSnapshotBrowseResp(msg.ID, req.SnapshotID, nil, "policy store not configured")
+		return
+	}
+
+	policyPayload, err := h.policyStore.LoadPolicy()
+	if err != nil {
+		log.Printf("load policy failed: %v", err)
+		h.sendSnapshotBrowseResp(msg.ID, req.SnapshotID, nil, "load policy: "+err.Error())
+		return
+	}
+
+	entries, err := h.snapshotBrowseRunner(context.Background(), executorConfigForPolicy(h.configDir, policyPayload), req.SnapshotID)
+	if err != nil {
+		h.sendSnapshotBrowseResp(msg.ID, req.SnapshotID, nil, err.Error())
+		return
+	}
+
+	protoEntries := make([]protocol.SnapshotFileEntry, len(entries))
+	for i, entry := range entries {
+		protoEntries[i] = protocol.SnapshotFileEntry{
+			Path:  entry.Path,
+			Type:  entry.Type,
+			Size:  entry.Size,
+			Mtime: entry.Mtime,
+		}
+	}
+	h.sendSnapshotBrowseResp(msg.ID, req.SnapshotID, protoEntries, "")
+}
+
+func (h *Handler) sendSnapshotBrowseResp(messageID string, snapshotID string, entries []protocol.SnapshotFileEntry, errorText string) {
+	payload := protocol.SnapshotBrowseRespPayload{
+		SnapshotID: snapshotID,
+		Entries:    entries,
+		Error:      errorText,
+	}
+	msg, err := protocol.NewMessage(protocol.TypeSnapshotBrowseResp, payload)
+	if err != nil {
+		log.Printf("create snapshot browse response failed: %v", err)
+		return
+	}
+	msg.ID = messageID
+	if err := h.sendMessage(*msg); err != nil {
+		log.Printf("send snapshot browse response failed: %v", err)
 	}
 }
 

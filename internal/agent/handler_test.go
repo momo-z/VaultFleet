@@ -672,7 +672,7 @@ func TestHandleRestorePersistsPendingResultWithRequestMessageIDWhenSendFails(t *
 			}
 			return nil
 		},
-		RestoreRunner: func(context.Context, executor.ExecutorConfig, string, string) error {
+		RestoreRunner: func(context.Context, executor.ExecutorConfig, string, string, []string) error {
 			return nil
 		},
 	})
@@ -732,20 +732,23 @@ func TestHandleRestoreInvokesRunnerAndSendsSuccessTaskResult(t *testing.T) {
 	var runnerConfig executor.ExecutorConfig
 	var runnerSnapshotID string
 	var runnerTarget string
+	var runnerIncludePaths []string
 	handler := NewHandler(HandlerConfig{
 		PolicyStore: store,
 		ConfigDir:   configDir,
 		SendFunc:    sent.send,
-		RestoreRunner: func(_ context.Context, cfg executor.ExecutorConfig, snapshotID string, target string) error {
+		RestoreRunner: func(_ context.Context, cfg executor.ExecutorConfig, snapshotID string, target string, includePaths []string) error {
 			runnerConfig = cfg
 			runnerSnapshotID = snapshotID
 			runnerTarget = target
+			runnerIncludePaths = includePaths
 			return nil
 		},
 	})
 	msg, err := protocol.NewMessage(protocol.TypeRestoreReq, protocol.RestoreReqPayload{
-		SnapshotID: "snap-1",
-		Target:     "/restore/target",
+		SnapshotID:   "snap-1",
+		Target:       "/restore/target",
+		IncludePaths: []string{"/etc/hosts", "/srv/app"},
 	})
 	require.NoError(t, err)
 
@@ -754,6 +757,7 @@ func TestHandleRestoreInvokesRunnerAndSendsSuccessTaskResult(t *testing.T) {
 	assert.Equal(t, executor.ExecutorConfig{ConfigDir: configDir, RepoPath: "repo/agent-1"}, runnerConfig)
 	assert.Equal(t, "snap-1", runnerSnapshotID)
 	assert.Equal(t, "/restore/target", runnerTarget)
+	assert.Equal(t, []string{"/etc/hosts", "/srv/app"}, runnerIncludePaths)
 	messages := sent.snapshot()
 	require.Len(t, messages, 2)
 	assert.Equal(t, protocol.TypeRestoreProgress, messages[0].Type)
@@ -790,7 +794,7 @@ func TestHandleRestoreRunnerFailureSendsFailedTaskResult(t *testing.T) {
 		PolicyStore: store,
 		ConfigDir:   t.TempDir(),
 		SendFunc:    sent.send,
-		RestoreRunner: func(context.Context, executor.ExecutorConfig, string, string) error {
+		RestoreRunner: func(context.Context, executor.ExecutorConfig, string, string, []string) error {
 			return errors.New("restore failed")
 		},
 	})
@@ -917,6 +921,93 @@ func TestHandleSnapshotListMissingPolicySendsErrorPayload(t *testing.T) {
 	assert.Equal(t, "agent-1", payload.AgentID)
 	assert.Contains(t, payload.Error, "load policy")
 	assert.Nil(t, payload.Snapshots)
+}
+
+func TestHandleSnapshotBrowseInvokesRunnerAndSendsResponseWithSameID(t *testing.T) {
+	store := policy.NewStore(t.TempDir())
+	configDir := t.TempDir()
+	require.NoError(t, store.SavePolicy(&protocol.PolicyPushPayload{
+		AgentID: "agent-1",
+		Storage: protocol.StorageConfig{
+			RepoPath: "repo/agent-1",
+		},
+		BackupDirs:      []string{"/srv"},
+		ExcludePatterns: []string{"*.tmp"},
+		Retention:       protocol.RetentionPolicy{KeepLast: 2},
+	}))
+	sent := &sentMessages{}
+	var runnerConfig executor.ExecutorConfig
+	var runnerSnapshotID string
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: store,
+		ConfigDir:   configDir,
+		SendFunc:    sent.send,
+		SnapshotBrowseRunner: func(_ context.Context, cfg executor.ExecutorConfig, snapshotID string) ([]executor.SnapshotFileEntry, error) {
+			runnerConfig = cfg
+			runnerSnapshotID = snapshotID
+			return []executor.SnapshotFileEntry{
+				{Path: "/srv", Type: "dir", Size: 0, Mtime: "2026-05-22T08:00:00Z"},
+				{Path: "/srv/app.db", Type: "file", Size: 4096, Mtime: "2026-05-22T08:01:00Z"},
+			}, nil
+		},
+	})
+	msg, err := protocol.NewMessage(protocol.TypeSnapshotBrowseReq, protocol.SnapshotBrowseReqPayload{SnapshotID: "snap-1"})
+	require.NoError(t, err)
+
+	handler.Handle(*msg)
+
+	assert.Equal(t, executor.ExecutorConfig{
+		ConfigDir:  configDir,
+		RepoPath:   "repo/agent-1",
+		BackupDirs: []string{"/srv"},
+		Excludes:   []string{"*.tmp"},
+		Retention:  executor.RetentionPolicy{KeepLast: 2},
+	}, runnerConfig)
+	assert.Equal(t, "snap-1", runnerSnapshotID)
+	messages := sent.snapshot()
+	require.Len(t, messages, 1)
+	assert.Equal(t, protocol.TypeSnapshotBrowseResp, messages[0].Type)
+	assert.Equal(t, msg.ID, messages[0].ID)
+	payload, err := protocol.ParsePayload[protocol.SnapshotBrowseRespPayload](&messages[0])
+	require.NoError(t, err)
+	assert.Equal(t, "snap-1", payload.SnapshotID)
+	assert.Empty(t, payload.Error)
+	require.Len(t, payload.Entries, 2)
+	assert.Equal(t, protocol.SnapshotFileEntry{Path: "/srv", Type: "dir", Size: 0, Mtime: "2026-05-22T08:00:00Z"}, payload.Entries[0])
+	assert.Equal(t, protocol.SnapshotFileEntry{Path: "/srv/app.db", Type: "file", Size: 4096, Mtime: "2026-05-22T08:01:00Z"}, payload.Entries[1])
+}
+
+func TestHandleSnapshotBrowseRunnerFailureSendsErrorPayload(t *testing.T) {
+	store := policy.NewStore(t.TempDir())
+	require.NoError(t, store.SavePolicy(&protocol.PolicyPushPayload{
+		AgentID: "agent-1",
+		Storage: protocol.StorageConfig{
+			RepoPath: "repo/agent-1",
+		},
+	}))
+	sent := &sentMessages{}
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: store,
+		ConfigDir:   t.TempDir(),
+		SendFunc:    sent.send,
+		SnapshotBrowseRunner: func(context.Context, executor.ExecutorConfig, string) ([]executor.SnapshotFileEntry, error) {
+			return nil, errors.New("browse failed")
+		},
+	})
+	msg, err := protocol.NewMessage(protocol.TypeSnapshotBrowseReq, protocol.SnapshotBrowseReqPayload{SnapshotID: "snap-1"})
+	require.NoError(t, err)
+
+	handler.Handle(*msg)
+
+	messages := sent.snapshot()
+	require.Len(t, messages, 1)
+	assert.Equal(t, protocol.TypeSnapshotBrowseResp, messages[0].Type)
+	assert.Equal(t, msg.ID, messages[0].ID)
+	payload, err := protocol.ParsePayload[protocol.SnapshotBrowseRespPayload](&messages[0])
+	require.NoError(t, err)
+	assert.Equal(t, "snap-1", payload.SnapshotID)
+	assert.Equal(t, "browse failed", payload.Error)
+	assert.Nil(t, payload.Entries)
 }
 
 func TestHandlerDirBrowseReqSendsResponseWithSameID(t *testing.T) {
