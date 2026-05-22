@@ -4,7 +4,7 @@ import { listPolicies, createPolicy, updatePolicy, deletePolicy } from "@/servic
 import { listAgents, backupNow } from "@/services/agents";
 import { listStorage } from "@/services/storage";
 import { copyToClipboard } from "@/lib/utils";
-import { BackupPolicy, PolicyInput } from "@/types/policy";
+import { BackupPolicy, PolicyInput, RetentionConfig } from "@/types/policy";
 import { StatusBadge } from "@/components/status-badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -53,11 +53,11 @@ const RETENTION_PRESETS: Record<string, { label: string; description: string; va
   },
 };
 
-function detectRetentionPreset(retention: { keep_last: number; keep_daily: number; keep_weekly: number; keep_monthly: number }): string {
+function detectRetentionPreset(retention: RetentionConfig): string {
   for (const [key, preset] of Object.entries(RETENTION_PRESETS)) {
     if (key === "custom") continue;
     const v = preset.values;
-    if (retention.keep_last === v.keep_last && retention.keep_daily === v.keep_daily && retention.keep_weekly === v.keep_weekly && retention.keep_monthly === v.keep_monthly) {
+    if ((retention.keep_last ?? 0) === v.keep_last && (retention.keep_daily ?? 0) === v.keep_daily && (retention.keep_weekly ?? 0) === v.keep_weekly && (retention.keep_monthly ?? 0) === v.keep_monthly) {
       return key;
     }
   }
@@ -77,7 +77,7 @@ export function PoliciesPage() {
   const [formData, setFormData] = useState<PolicyInput>({
     agent_id: "",
     storage_id: "",
-    repo_path: "vaultfleet",
+    repo_path: "",
     restic_password: "",
     backup_dirs: [],
     exclude_patterns: ["/tmp", "/proc", "/sys", "/dev"],
@@ -153,10 +153,13 @@ export function PoliciesPage() {
 
   const handleEdit = (policy: BackupPolicy) => {
     setEditingId(policy.id);
+    const repoSuffix = policy.repo_path.startsWith("vaultfleet/")
+      ? policy.repo_path.slice("vaultfleet/".length)
+      : policy.repo_path;
     setFormData({
       agent_id: policy.agent_id,
       storage_id: policy.storage_id,
-      repo_path: policy.repo_path,
+      repo_path: repoSuffix,
       backup_dirs: policy.backup_dirs,
       exclude_patterns: policy.exclude_patterns,
       schedule: policy.schedule,
@@ -174,7 +177,7 @@ export function PoliciesPage() {
       setFormData({
         agent_id: "",
         storage_id: "",
-        repo_path: "vaultfleet",
+        repo_path: "",
         restic_password: "",
         backup_dirs: [],
         exclude_patterns: ["/tmp", "/proc", "/sys", "/dev"],
@@ -189,10 +192,11 @@ export function PoliciesPage() {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    const submitData = { ...formData, repo_path: "vaultfleet/" + formData.repo_path };
     if (editingId) {
-      updateMutation.mutate(formData);
+      updateMutation.mutate(submitData);
     } else {
-      createMutation.mutate(formData);
+      createMutation.mutate(submitData);
     }
   };
 
@@ -253,9 +257,16 @@ export function PoliciesPage() {
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
                     <Label>选择节点</Label>
-                    <Select 
-                      value={formData.agent_id} 
-                      onValueChange={(val) => setFormData({ ...formData, agent_id: val })}
+                    <Select
+                      value={formData.agent_id}
+                      onValueChange={(val) => {
+                        const agent = agents?.find(a => a.id === val);
+                        const updates: Partial<PolicyInput> = { agent_id: val };
+                        if (!editingId && agent) {
+                          updates.repo_path = agent.name;
+                        }
+                        setFormData({ ...formData, ...updates });
+                      }}
                       disabled={!!editingId}
                     >
                       <SelectTrigger><SelectValue placeholder="请选择节点" /></SelectTrigger>
@@ -281,14 +292,20 @@ export function PoliciesPage() {
 
                 <div className="space-y-2">
                   <Label htmlFor="repo_path">仓库子路径</Label>
-                  <Input
-                    id="repo_path"
-                    value={formData.repo_path}
-                    onChange={(e) => setFormData({ ...formData, repo_path: e.target.value })}
-                    placeholder="如: vaultfleet/my-server"
-                    disabled={!!editingId}
-                  />
-                  <p className="text-xs text-muted-foreground">备份数据在存储端点中的唯一路径。留空默认生成。相同路径 = 相同仓库，更换节点后使用原路径即可恢复数据。</p>
+                  <div className="flex">
+                    <span className="inline-flex items-center rounded-l-md border border-r-0 border-input bg-muted px-3 text-sm text-muted-foreground">
+                      vaultfleet/
+                    </span>
+                    <Input
+                      id="repo_path"
+                      className="rounded-l-none"
+                      value={formData.repo_path}
+                      onChange={(e) => setFormData({ ...formData, repo_path: e.target.value })}
+                      placeholder={selectedAgent?.name || "my-server"}
+                      disabled={!!editingId}
+                    />
+                  </div>
+                  <p className="text-xs text-muted-foreground">备份仓库的唯一标识。更换节点后使用相同路径即可访问原有备份数据。</p>
                 </div>
 
                 {!editingId && (
@@ -378,29 +395,29 @@ export function PoliciesPage() {
                     <div className="grid grid-cols-2 gap-4 pt-2">
                       <div className="space-y-1.5">
                         <Label className="text-xs">保留最近副本</Label>
-                        <Input type="number" min={0} value={formData.retention.keep_last} onChange={(e) => setFormData({ ...formData, retention: { ...formData.retention, keep_last: parseInt(e.target.value) || 0 }})} />
+                        <Input type="number" min={0} value={formData.retention.keep_last ?? 0} onChange={(e) => setFormData({ ...formData, retention: { ...formData.retention, keep_last: parseInt(e.target.value) || 0 }})} />
                         <p className="text-[11px] text-muted-foreground">始终保留最近 N 个快照</p>
                       </div>
                       <div className="space-y-1.5">
                         <Label className="text-xs">保留每日副本</Label>
-                        <Input type="number" min={0} value={formData.retention.keep_daily} onChange={(e) => setFormData({ ...formData, retention: { ...formData.retention, keep_daily: parseInt(e.target.value) || 0 }})} />
+                        <Input type="number" min={0} value={formData.retention.keep_daily ?? 0} onChange={(e) => setFormData({ ...formData, retention: { ...formData.retention, keep_daily: parseInt(e.target.value) || 0 }})} />
                         <p className="text-[11px] text-muted-foreground">每天保留 1 个，共 N 天</p>
                       </div>
                       <div className="space-y-1.5">
                         <Label className="text-xs">保留每周副本</Label>
-                        <Input type="number" min={0} value={formData.retention.keep_weekly} onChange={(e) => setFormData({ ...formData, retention: { ...formData.retention, keep_weekly: parseInt(e.target.value) || 0 }})} />
+                        <Input type="number" min={0} value={formData.retention.keep_weekly ?? 0} onChange={(e) => setFormData({ ...formData, retention: { ...formData.retention, keep_weekly: parseInt(e.target.value) || 0 }})} />
                         <p className="text-[11px] text-muted-foreground">每周保留 1 个，共 N 周</p>
                       </div>
                       <div className="space-y-1.5">
                         <Label className="text-xs">保留每月副本</Label>
-                        <Input type="number" min={0} value={formData.retention.keep_monthly} onChange={(e) => setFormData({ ...formData, retention: { ...formData.retention, keep_monthly: parseInt(e.target.value) || 0 }})} />
+                        <Input type="number" min={0} value={formData.retention.keep_monthly ?? 0} onChange={(e) => setFormData({ ...formData, retention: { ...formData.retention, keep_monthly: parseInt(e.target.value) || 0 }})} />
                         <p className="text-[11px] text-muted-foreground">每月保留 1 个，共 N 个月</p>
                       </div>
                     </div>
                   )}
                   {retentionPreset !== "custom" && (
                     <div className="text-xs text-muted-foreground bg-muted/50 rounded-md px-3 py-2">
-                      最近 {formData.retention.keep_last} 个 · 每日 {formData.retention.keep_daily} 份 · 每周 {formData.retention.keep_weekly} 份 · 每月 {formData.retention.keep_monthly} 份
+                      最近 {formData.retention.keep_last ?? 0} 个 · 每日 {formData.retention.keep_daily ?? 0} 份 · 每周 {formData.retention.keep_weekly ?? 0} 份 · 每月 {formData.retention.keep_monthly ?? 0} 份
                     </div>
                   )}
                 </div>

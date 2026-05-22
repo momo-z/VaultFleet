@@ -7,7 +7,7 @@ import { Snapshot } from "@/types/snapshot";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { RefreshCw, Camera, Undo2, AlertCircle, CheckCircle2 } from "lucide-react";
+import { RefreshCw, Camera, Undo2, AlertCircle, CheckCircle2, Info } from "lucide-react";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle, SheetFooter } from "@/components/ui/sheet";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -18,6 +18,8 @@ import { cn } from "@/lib/utils";
 import { ErrorPanel } from "@/components/error-panel";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { toast } from "sonner";
+import { listPolicies } from "@/services/policies";
+import { listStorage } from "@/services/storage";
 
 export function SnapshotsPage() {
   const navigate = useNavigate();
@@ -31,6 +33,8 @@ export function SnapshotsPage() {
   const [restoreSuccessId, setRestoreSuccessId] = useState<string | null>(null);
 
   const { data: agents } = useQuery({ queryKey: ["agents"], queryFn: listAgents });
+  const { data: policies } = useQuery({ queryKey: ["policies"], queryFn: () => listPolicies() });
+  const { data: storageList } = useQuery({ queryKey: ["storage"], queryFn: listStorage });
   const { data: snapshots, isLoading, isFetching } = useQuery({
     queryKey: ["snapshots", agentId],
     queryFn: () => listSnapshots(agentId),
@@ -119,9 +123,43 @@ export function SnapshotsPage() {
       </div>
 
       {!agentId ? (
-        <div className="flex flex-col items-center justify-center h-64 border-2 border-dashed rounded-lg text-muted-foreground space-y-4">
-          <Camera className="h-12 w-12 opacity-20" />
-          <p>请选择一个节点以查看其备份快照</p>
+        <div className="space-y-6">
+          <div className="flex flex-col items-center justify-center h-48 border-2 border-dashed rounded-lg text-muted-foreground space-y-4">
+            <Camera className="h-12 w-12 opacity-20" />
+            <p>请选择一个节点以查看其备份快照</p>
+          </div>
+
+          {policies && policies.length > 0 && (
+            <div className="space-y-3">
+              <div className="flex items-center gap-2">
+                <Info className="h-4 w-4 text-muted-foreground" />
+                <h3 className="text-sm font-medium">跨节点恢复</h3>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                如需将数据恢复到新节点，请在新节点上创建策略时使用相同的<strong>存储</strong>和<strong>仓库子路径</strong>。策略同步后，原有快照将自动出现在新节点下。
+              </p>
+              <div className="rounded-md border">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>节点</TableHead>
+                      <TableHead>仓库路径</TableHead>
+                      <TableHead>存储</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {policies.map((p) => (
+                      <TableRow key={p.id}>
+                        <TableCell className="text-sm">{agents?.find(a => a.id === p.agent_id)?.name || p.agent_id}</TableCell>
+                        <TableCell className="font-mono text-xs">{p.repo_path}</TableCell>
+                        <TableCell className="text-xs text-muted-foreground">{storageList?.find(s => s.id === p.storage_id)?.name || p.storage_id.substring(0, 8)}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </div>
+          )}
         </div>
       ) : (
         <div className="rounded-md border">
