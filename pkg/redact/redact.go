@@ -7,12 +7,13 @@ import (
 
 const Placeholder = "[REDACTED]"
 
-var sensitiveKV = regexp.MustCompile(`(?i)(token|password|passwd|secret|cookie|credential|api_key|access_key|secret_key|private_key|auth)(\s*[=:]\s*)(\S+)`)
-var bearerToken = regexp.MustCompile(`(?i)(Bearer\s+)\S+`)
+var sensitiveKV = regexp.MustCompile(`(?i)(\b(?:[a-z0-9_.-]*(?:token|password|passwd|secret|cookie|credential|api_key|access_key|private_key|key_pem)[a-z0-9_.-]*|[a-z0-9_.-]*_key|pass|auth)\b)(\s*[=:]\s*)(\S+)`)
+var authorizationToken = regexp.MustCompile(`(?i)(Authorization:\s*(?:Bearer|Basic)\s+)\S+`)
 
 func Text(s string) string {
+	s = authorizationToken.ReplaceAllString(s, "${1}"+Placeholder)
 	s = sensitiveKV.ReplaceAllString(s, "${1}${2}"+Placeholder)
-	return bearerToken.ReplaceAllString(s, "${1}"+Placeholder)
+	return s
 }
 
 func JSONFields(m map[string]any, fields ...string) map[string]any {

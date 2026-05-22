@@ -270,7 +270,7 @@ func (h *DiagnosticHandler) collectAgentLogs(zw *zip.Writer, agentIDs []string) 
 			recordAgentFailure(payload.Error)
 		}
 		if payload.Logs != "" {
-			if err := writeTextFile(zw, dirName+"/logs.txt", payload.Logs); err != nil {
+			if err := writeTextFile(zw, dirName+"/logs.txt", redact.Text(payload.Logs)); err != nil {
 				warnings = append(warnings, agentWarning(agentID, name, err.Error()))
 			}
 		}

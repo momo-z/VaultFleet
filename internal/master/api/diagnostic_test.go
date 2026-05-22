@@ -156,7 +156,7 @@ func TestDiagnosticHandler_CollectsSelectedAgentLogs(t *testing.T) {
 	agentID := seedDiagnosticAgent(t, setup.database, "Agent One", "online")
 	setup.hub.online[agentID] = true
 	resp, err := protocol.NewMessage(protocol.TypeCollectLogsResp, protocol.CollectLogsRespPayload{
-		Logs: "agent log token=[REDACTED]\n",
+		Logs: "agent log token=raw-token\n",
 	})
 	require.NoError(t, err)
 	setup.hub.responses[agentID] = *resp
@@ -168,6 +168,7 @@ func TestDiagnosticHandler_CollectsSelectedAgentLogs(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 	files := readZipFiles(t, w.Body)
 	assert.Equal(t, "agent log token=[REDACTED]\n", files["agents/"+agentID+"/logs.txt"])
+	assert.NotContains(t, files["agents/"+agentID+"/logs.txt"], "raw-token")
 	require.Len(t, setup.hub.sent, 1)
 	assert.Equal(t, protocol.TypeCollectLogsReq, setup.hub.sent[0].Type)
 }

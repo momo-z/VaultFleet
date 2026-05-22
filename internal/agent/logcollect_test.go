@@ -3,6 +3,7 @@ package agent
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -43,6 +44,53 @@ func TestCollectLogs_Truncation(t *testing.T) {
 	result, err := collectLogsFromFile(logFile, 50)
 	require.NoError(t, err)
 	assert.LessOrEqual(t, len(result), 50)
+}
+
+func TestCollectLogsFromFile_TailReadsLargeFile(t *testing.T) {
+	dir := t.TempDir()
+	logFile := filepath.Join(dir, "agent.log")
+	file, err := os.Create(logFile)
+	require.NoError(t, err)
+	_, err = file.Seek(32*1024*1024, 0)
+	require.NoError(t, err)
+	_, err = file.WriteString("tail-line\n")
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+
+	result, err := collectLogsFromFile(logFile, len("tail-line\n"))
+
+	require.NoError(t, err)
+	assert.Equal(t, "tail-line\n", result)
+}
+
+func TestReadTailReturnsOnlyRequestedBytes(t *testing.T) {
+	dir := t.TempDir()
+	logFile := filepath.Join(dir, "agent.log")
+	require.NoError(t, os.WriteFile(logFile, []byte(strings.Repeat("A", 1024)+"tail-line\n"), 0o644))
+
+	data, err := readTail(logFile, len("tail-line\n"))
+
+	require.NoError(t, err)
+	assert.Equal(t, "tail-line\n", string(data))
+}
+
+func TestCollectLogsFromJournalctl_LimitsOutputAtSource(t *testing.T) {
+	dir := t.TempDir()
+	binDir := filepath.Join(dir, "bin")
+	require.NoError(t, os.Mkdir(binDir, 0o755))
+	argsFile := filepath.Join(dir, "args.txt")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + argsFile + "\nprintf 'line1\\npassword=secret\\nline3\\n'\n"
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "journalctl"), []byte(script), 0o755))
+	t.Setenv("PATH", binDir)
+
+	result, err := collectLogsFromJournalctl(12)
+
+	require.NoError(t, err)
+	assert.LessOrEqual(t, len(result), 12)
+	assert.NotContains(t, result, "secret")
+	args, err := os.ReadFile(argsFile)
+	require.NoError(t, err)
+	assert.Contains(t, string(args), "--lines")
 }
 
 func TestCollectLogs_TruncationAfterRedaction(t *testing.T) {
