@@ -27,7 +27,7 @@ func TestBuildRuntimeWiresDurableCommandService(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	runtime := buildRuntime(ctx, database)
+	runtime := buildRuntime(ctx, database, nil)
 
 	require.NotNil(t, runtime.commandService)
 	require.NotNil(t, runtime.wsHandler.PendingCommandDispatcher)
@@ -100,7 +100,7 @@ func TestRuntimeReconnectPolicyPushIsDurableAndNotDuplicated(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	runtime := buildRuntime(ctx, database)
+	runtime := buildRuntime(ctx, database, nil)
 	server := httptest.NewServer(runtime.router)
 	t.Cleanup(server.Close)
 
@@ -146,7 +146,7 @@ func TestRuntimePolicyAckAfterTrackerRestartMarksPolicySynced(t *testing.T) {
 
 	firstCtx, firstCancel := context.WithCancel(context.Background())
 	t.Cleanup(firstCancel)
-	firstRuntime := buildRuntime(firstCtx, database)
+	firstRuntime := buildRuntime(firstCtx, database, nil)
 	require.True(t, firstRuntime.policyPusher.EnsureDurableCommand(context.Background(), agent.ID))
 
 	var pending db.AgentCommand
@@ -155,7 +155,7 @@ func TestRuntimePolicyAckAfterTrackerRestartMarksPolicySynced(t *testing.T) {
 
 	restartedCtx, restartedCancel := context.WithCancel(context.Background())
 	t.Cleanup(restartedCancel)
-	restartedRuntime := buildRuntime(restartedCtx, database)
+	restartedRuntime := buildRuntime(restartedCtx, database, nil)
 	server := httptest.NewServer(restartedRuntime.router)
 	t.Cleanup(server.Close)
 
@@ -185,7 +185,7 @@ func TestRuntimeTaskResultCompletesDurableBackupCommand(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	runtime := buildRuntime(ctx, database)
+	runtime := buildRuntime(ctx, database, nil)
 	command := createMasterTestBackupCommand(t, runtime.commandService, agent.ID)
 	server := httptest.NewServer(runtime.router)
 	t.Cleanup(server.Close)
@@ -242,7 +242,7 @@ func TestRuntimeSnapshotListResponseCompletesDurableCommandWithoutWaiter(t *test
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	runtime := buildRuntime(ctx, database)
+	runtime := buildRuntime(ctx, database, nil)
 	command := createMasterTestSnapshotListCommand(t, runtime.commandService, agent.ID)
 	server := httptest.NewServer(runtime.router)
 	t.Cleanup(server.Close)
@@ -289,7 +289,7 @@ func TestRuntimeStartsCommandTimeoutScanner(t *testing.T) {
 
 	runtime := buildRuntimeWithOptions(ctx, database, runtimeOptions{
 		commandTimeoutScanInterval: 5 * time.Millisecond,
-	})
+	}, nil)
 	command := createMasterTestBackupCommand(t, runtime.commandService, agent.ID)
 	expiredAt := time.Now().Add(-time.Minute)
 	require.NoError(t, database.DB.Model(&db.AgentCommand{}).

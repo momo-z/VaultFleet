@@ -16,6 +16,7 @@ import (
 	"vaultfleet/internal/master/commands"
 	"vaultfleet/internal/master/db"
 	"vaultfleet/internal/master/events"
+	"vaultfleet/internal/master/logbuf"
 	"vaultfleet/internal/master/notify"
 	"vaultfleet/internal/master/ws"
 )
@@ -29,6 +30,7 @@ type masterRuntime struct {
 	wsHandler      *ws.Handler
 	policyPusher   *api.PolicyChangedPusher
 	router         http.Handler
+	logBuf         *logbuf.RingBuffer
 }
 
 type runtimeOptions struct {
@@ -40,6 +42,8 @@ func main() {
 	addr := flag.String("addr", ":8080", "HTTP listen address")
 	flag.Parse()
 
+	logRing := logbuf.New(2 * 1024 * 1024)
+	log.SetOutput(logRing.MultiWriter(log.Writer()))
 	log.Printf("starting VaultFleet master data-dir=%s addr=%s", *dataDir, *addr)
 
 	restored, err := backup.CheckAndRestore(*dataDir)
@@ -58,7 +62,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	runtime := buildRuntime(ctx, database)
+	runtime := buildRuntime(ctx, database, logRing)
 	go ws.NewMonitor(runtime.hub, runtime.bus).Run(ctx)
 
 	server := &http.Server{
@@ -96,13 +100,13 @@ func main() {
 	log.Printf("VaultFleet master stopped")
 }
 
-func buildRuntime(ctx context.Context, database *db.Database) masterRuntime {
+func buildRuntime(ctx context.Context, database *db.Database, logRing *logbuf.RingBuffer) masterRuntime {
 	return buildRuntimeWithOptions(ctx, database, runtimeOptions{
 		commandTimeoutScanInterval: time.Minute,
-	})
+	}, logRing)
 }
 
-func buildRuntimeWithOptions(ctx context.Context, database *db.Database, options runtimeOptions) masterRuntime {
+func buildRuntimeWithOptions(ctx context.Context, database *db.Database, options runtimeOptions, logRing *logbuf.RingBuffer) masterRuntime {
 	if options.commandTimeoutScanInterval <= 0 {
 		options.commandTimeoutScanInterval = time.Minute
 	}
@@ -140,6 +144,7 @@ func buildRuntimeWithOptions(ctx context.Context, database *db.Database, options
 		EventBus:       bus,
 		AgentWebSocket: wsHandler.HandleWebSocket,
 		Version:        version,
+		LogBuf:         logRing,
 	})
 
 	return masterRuntime{
@@ -149,5 +154,6 @@ func buildRuntimeWithOptions(ctx context.Context, database *db.Database, options
 		wsHandler:      wsHandler,
 		policyPusher:   policyPusher,
 		router:         router,
+		logBuf:         logRing,
 	}
 }
