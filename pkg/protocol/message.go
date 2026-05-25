@@ -26,6 +26,8 @@ const (
 	TypeSnapshotBrowseResp  = "snapshot_browse_resp"
 	TypeCollectLogsReq      = "collect_logs_req"
 	TypeCollectLogsResp     = "collect_logs_resp"
+	TypeDirSizeReq         = "dir_size_req"
+	TypeDirSizeResp        = "dir_size_resp"
 )
 
 const (
@@ -143,6 +145,16 @@ type SnapshotInfo struct {
 type DirBrowseReqPayload struct {
 	Path  string `json:"path"`
 	Depth int    `json:"depth"`
+}
+
+type DirSizeReqPayload struct {
+	Path string `json:"path"`
+}
+
+type DirSizeRespPayload struct {
+	Path  string `json:"path"`
+	Size  int64  `json:"size"`
+	Error string `json:"error,omitempty"`
 }
 
 // PolicyPushPayload contains the full backup policy sent from master to agent.

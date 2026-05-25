@@ -255,6 +255,23 @@ func TestRestorePayloads(t *testing.T) {
 	assert.InDelta(t, 75.5, parsedProgress.Percent, 0.01)
 }
 
+func TestDirSizeRoundTrip(t *testing.T) {
+	reqPayload := DirSizeReqPayload{Path: "/home/data"}
+
+	_, parsedReq := roundTripPayload[DirSizeReqPayload](t, TypeDirSizeReq, reqPayload)
+	assert.Equal(t, "/home/data", parsedReq.Path)
+
+	respPayload := DirSizeRespPayload{
+		Path: "/home/data",
+		Size: 1073741824,
+	}
+
+	_, parsedResp := roundTripPayload[DirSizeRespPayload](t, TypeDirSizeResp, respPayload)
+	assert.Equal(t, "/home/data", parsedResp.Path)
+	assert.Equal(t, int64(1073741824), parsedResp.Size)
+	assert.Empty(t, parsedResp.Error)
+}
+
 func TestAllMessageTypeConstants(t *testing.T) {
 	types := []string{
 		TypeHeartbeat,
@@ -273,6 +290,8 @@ func TestAllMessageTypeConstants(t *testing.T) {
 		TypeSnapshotBrowseResp,
 		TypeCollectLogsReq,
 		TypeCollectLogsResp,
+		TypeDirSizeReq,
+		TypeDirSizeResp,
 	}
 	expected := []string{
 		"heartbeat",
@@ -291,10 +310,12 @@ func TestAllMessageTypeConstants(t *testing.T) {
 		"snapshot_browse_resp",
 		"collect_logs_req",
 		"collect_logs_resp",
+		"dir_size_req",
+		"dir_size_resp",
 	}
 
 	assert.Equal(t, expected, types)
-	assert.Len(t, types, 16)
+	assert.Len(t, types, 18)
 	seen := make(map[string]bool)
 	for _, typ := range types {
 		assert.NotEmpty(t, typ)
