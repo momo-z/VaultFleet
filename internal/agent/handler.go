@@ -22,6 +22,8 @@ type SendFunc func(protocol.Message) error
 
 type BrowseFunc func(fsRoot string, scanPath string, maxDepth int) ([]protocol.DirEntry, error)
 
+type DirSizeFunc func(fsRoot string, path string) (int64, error)
+
 type BackupRunnerFunc func(context.Context, executor.ExecutorConfig) executor.TaskResult
 type RestoreRunnerFunc func(context.Context, executor.ExecutorConfig, string, string, []string) error
 type SnapshotListRunnerFunc func(context.Context, executor.ExecutorConfig) ([]executor.SnapshotInfo, error)
@@ -45,6 +47,7 @@ type HandlerConfig struct {
 	RestoreRunner        RestoreRunnerFunc
 	SnapshotListRunner   SnapshotListRunnerFunc
 	SnapshotBrowseRunner SnapshotBrowseRunnerFunc
+	DirSizeFunc          DirSizeFunc
 }
 
 type Handler struct {
@@ -59,6 +62,7 @@ type Handler struct {
 	restoreRunner        RestoreRunnerFunc
 	snapshotListRunner   SnapshotListRunnerFunc
 	snapshotBrowseRunner SnapshotBrowseRunnerFunc
+	dirSizeFunc          DirSizeFunc
 	backupMu             sync.Mutex
 	backupRunning        bool
 }
@@ -88,6 +92,10 @@ func NewHandler(config HandlerConfig) *Handler {
 	if snapshotBrowseRunner == nil {
 		snapshotBrowseRunner = runSnapshotBrowse
 	}
+	dirSizeFunc := config.DirSizeFunc
+	if dirSizeFunc == nil {
+		dirSizeFunc = filebrowse.CalculateDirSize
+	}
 	policyScheduler := config.Scheduler
 	if policyScheduler == nil {
 		defaultScheduler := scheduler.New()
@@ -108,6 +116,7 @@ func NewHandler(config HandlerConfig) *Handler {
 		restoreRunner:        restoreRunner,
 		snapshotListRunner:   snapshotListRunner,
 		snapshotBrowseRunner: snapshotBrowseRunner,
+		dirSizeFunc:          dirSizeFunc,
 	}
 }
 
@@ -119,6 +128,8 @@ func (h *Handler) Handle(msg protocol.Message) {
 		h.handleBackupNow(msg)
 	case protocol.TypeDirBrowseReq:
 		h.handleDirBrowseReq(msg)
+	case protocol.TypeDirSizeReq:
+		h.handleDirSizeReq(msg)
 	case protocol.TypeRestoreReq, protocol.TypeSelectiveRestoreReq:
 		h.handleRestoreReq(msg)
 	case protocol.TypeSnapshotListReq:
@@ -916,5 +927,37 @@ func (h *Handler) handleDirBrowseReq(msg protocol.Message) {
 	}
 	if err := h.send(*resp); err != nil {
 		log.Printf("send directory browse response failed: %v", err)
+	}
+}
+
+func (h *Handler) handleDirSizeReq(msg protocol.Message) {
+	req, err := protocol.ParsePayload[protocol.DirSizeReqPayload](&msg)
+	if err != nil {
+		log.Printf("parse directory size request failed: %v", err)
+		return
+	}
+
+	size, sizeErr := h.dirSizeFunc("/", req.Path)
+	payload := protocol.DirSizeRespPayload{
+		Path: req.Path,
+		Size: size,
+	}
+	if sizeErr != nil {
+		payload.Error = sizeErr.Error()
+		payload.Size = 0
+	}
+
+	resp, err := protocol.NewMessage(protocol.TypeDirSizeResp, payload)
+	if err != nil {
+		log.Printf("create directory size response failed: %v", err)
+		return
+	}
+	resp.ID = msg.ID
+
+	if h.send == nil {
+		return
+	}
+	if err := h.send(*resp); err != nil {
+		log.Printf("send directory size response failed: %v", err)
 	}
 }

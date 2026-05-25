@@ -1122,6 +1122,63 @@ func TestHandlerDirBrowseReqSendsErrorPayload(t *testing.T) {
 	assert.Nil(t, payload.Entries)
 }
 
+func TestHandlerDirSizeReqSendsResponse(t *testing.T) {
+	sent := make(chan protocol.Message, 1)
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: policy.NewStore(""),
+		BrowseFunc: func(string, string, int) ([]protocol.DirEntry, error) {
+			return nil, nil
+		},
+		DirSizeFunc: func(fsRoot string, path string) (int64, error) {
+			assert.Equal(t, "/", fsRoot)
+			assert.Equal(t, "/home/data", path)
+			return 1073741824, nil
+		},
+		SendFunc: func(msg protocol.Message) error {
+			sent <- msg
+			return nil
+		},
+	})
+	req, err := protocol.NewMessage(protocol.TypeDirSizeReq, protocol.DirSizeReqPayload{Path: "/home/data"})
+	require.NoError(t, err)
+
+	handler.Handle(*req)
+
+	resp := <-sent
+	assert.Equal(t, protocol.TypeDirSizeResp, resp.Type)
+	assert.Equal(t, req.ID, resp.ID)
+	payload, err := protocol.ParsePayload[protocol.DirSizeRespPayload](&resp)
+	require.NoError(t, err)
+	assert.Equal(t, "/home/data", payload.Path)
+	assert.Equal(t, int64(1073741824), payload.Size)
+	assert.Empty(t, payload.Error)
+}
+
+func TestHandlerDirSizeReqSendsErrorPayload(t *testing.T) {
+	sent := make(chan protocol.Message, 1)
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: policy.NewStore(""),
+		DirSizeFunc: func(string, string) (int64, error) {
+			return 0, errors.New("permission denied")
+		},
+		SendFunc: func(msg protocol.Message) error {
+			sent <- msg
+			return nil
+		},
+	})
+	req, err := protocol.NewMessage(protocol.TypeDirSizeReq, protocol.DirSizeReqPayload{Path: "/root"})
+	require.NoError(t, err)
+
+	handler.Handle(*req)
+
+	resp := <-sent
+	payload, err := protocol.ParsePayload[protocol.DirSizeRespPayload](&resp)
+	require.NoError(t, err)
+	assert.Equal(t, "/root", payload.Path)
+	assert.Equal(t, "permission denied", payload.Error)
+	assert.Equal(t, int64(0), payload.Size)
+}
+
 type scheduledUpdate struct {
 	agentID  string
 	schedule string
