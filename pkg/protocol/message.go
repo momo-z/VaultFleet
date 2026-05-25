@@ -205,6 +205,7 @@ type SnapshotListReqPayload struct {
 // SnapshotBrowseReqPayload requests entries contained in one repository snapshot.
 type SnapshotBrowseReqPayload struct {
 	SnapshotID string `json:"snapshot_id"`
+	Path       string `json:"path,omitempty"`
 }
 
 // SnapshotBrowseRespPayload returns file entries contained in one snapshot.

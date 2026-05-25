@@ -1,5 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   ChevronDown,
@@ -32,7 +31,9 @@ interface TreeNode {
   type: "file" | "dir";
   size: number;
   mtime: string;
-  children: TreeNode[];
+  children: TreeNode[] | null;
+  loading: boolean;
+  error?: string;
 }
 
 export function SnapshotTreeBrowser({
@@ -43,92 +44,163 @@ export function SnapshotTreeBrowser({
   onSelectedPathsChange,
 }: SnapshotTreeBrowserProps) {
   const [expanded, setExpanded] = useState(false);
-  const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
-
-  const browseMutation = useMutation({
-    mutationFn: () => browseSnapshot(agentId, { snapshot_id: snapshotId }),
-  });
-
-  useEffect(() => {
-    setExpanded(false);
-    setExpandedNodes(new Set());
-    browseMutation.reset();
-  }, [agentId, snapshotId]);
-
-  const tree = useMemo(() => {
-    return buildTree(browseMutation.data?.entries ?? []);
-  }, [browseMutation.data?.entries]);
+  const [rootNodes, setRootNodes] = useState<TreeNode[]>([]);
+  const [rootLoading, setRootLoading] = useState(false);
+  const [rootError, setRootError] = useState<string | null>(null);
+  const inflightRef = useRef<Set<string>>(new Set());
 
   const selectedPathSet = useMemo(() => new Set(selectedPaths), [selectedPaths]);
 
-  const handleExpand = useCallback(() => {
-    if (!isAgentOnline) {
-      return;
-    }
-    setExpanded(true);
-    if (!browseMutation.data && !browseMutation.isPending) {
-      browseMutation.mutate();
-    }
-  }, [browseMutation, isAgentOnline]);
+  useEffect(() => {
+    setExpanded(false);
+    setRootNodes([]);
+    setRootLoading(false);
+    setRootError(null);
+  }, [agentId, snapshotId]);
 
-  const handleRefresh = useCallback(() => {
-    if (!isAgentOnline) {
-      return;
-    }
-    browseMutation.mutate();
-  }, [browseMutation, isAgentOnline]);
-
-  const handleToggleNode = useCallback((path: string) => {
-    setExpandedNodes((prev) => {
-      const next = new Set(prev);
-      if (next.has(path)) {
-        next.delete(path);
-      } else {
-        next.add(path);
+  const loadChildren = useCallback(
+    async (path?: string): Promise<TreeNode[]> => {
+      const resp = await browseSnapshot(agentId, {
+        snapshot_id: snapshotId,
+        ...(path ? { path } : {}),
+      });
+      if (resp.error) {
+        throw new Error(resp.error);
       }
-      return next;
-    });
-  }, []);
-
-  const getCheckedState = useCallback(
-    (node: TreeNode): boolean | "indeterminate" => {
-      const affectedPaths = node.type === "dir" && node.children.length > 0
-        ? getDescendantPaths(node)
-        : [node.path];
-      const selectedCount = affectedPaths.filter((path) => selectedPathSet.has(path)).length;
-
-      if (selectedCount === 0) {
-        return false;
-      }
-      if (selectedCount === affectedPaths.length) {
-        return true;
-      }
-      return "indeterminate";
+      const entries = resp.entries ?? [];
+      return sortEntries(entries).map((e) => ({
+        name: getPathName(e.path),
+        path: e.path,
+        type: e.type,
+        size: e.size,
+        mtime: e.mtime,
+        children: e.type === "dir" ? null : [],
+        loading: false,
+      }));
     },
-    [selectedPathSet],
+    [agentId, snapshotId],
+  );
+
+  const handleExpand = useCallback(async () => {
+    if (!isAgentOnline) return;
+    setExpanded(true);
+    setRootLoading(true);
+    setRootError(null);
+    try {
+      const nodes = await loadChildren();
+      setRootNodes(nodes);
+    } catch (err: any) {
+      setRootError(err?.message || "请求超时或 Agent 异常");
+    } finally {
+      setRootLoading(false);
+    }
+  }, [isAgentOnline, loadChildren]);
+
+  const handleRefresh = useCallback(async () => {
+    if (!isAgentOnline) return;
+    setRootLoading(true);
+    setRootError(null);
+    try {
+      const nodes = await loadChildren();
+      setRootNodes(nodes);
+    } catch (err: any) {
+      setRootError(err?.message || "请求超时或 Agent 异常");
+    } finally {
+      setRootLoading(false);
+    }
+  }, [isAgentOnline, loadChildren]);
+
+  const updateNodeAtPath = useCallback(
+    (
+      nodeList: TreeNode[],
+      targetPath: string,
+      updater: (node: TreeNode) => TreeNode,
+    ): TreeNode[] => {
+      return nodeList.map((node) => {
+        if (node.path === targetPath) {
+          return updater(node);
+        }
+        if (node.children && targetPath.startsWith(node.path + "/")) {
+          return {
+            ...node,
+            children: updateNodeAtPath(node.children, targetPath, updater),
+          };
+        }
+        return node;
+      });
+    },
+    [],
+  );
+
+  const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
+
+  const handleToggle = useCallback(
+    (path: string) => {
+      const node = findNode(rootNodes, path);
+      if (!node || node.type !== "dir") return;
+
+      const isExpanded = expandedNodes.has(path);
+      if (isExpanded) {
+        setExpandedNodes((prev) => {
+          const next = new Set(prev);
+          next.delete(path);
+          return next;
+        });
+        return;
+      }
+
+      setExpandedNodes((prev) => {
+        const next = new Set(prev);
+        next.add(path);
+        return next;
+      });
+
+      if (node.children !== null) return;
+
+      if (inflightRef.current.has(path)) return;
+      inflightRef.current.add(path);
+
+      setRootNodes((prev) =>
+        updateNodeAtPath(prev, path, (n) => ({ ...n, loading: true })),
+      );
+
+      loadChildren(path)
+        .then((children) => {
+          setRootNodes((prev) =>
+            updateNodeAtPath(prev, path, (n) => ({
+              ...n,
+              children,
+              loading: false,
+              error: undefined,
+            })),
+          );
+        })
+        .catch((err: any) => {
+          setRootNodes((prev) =>
+            updateNodeAtPath(prev, path, (n) => ({
+              ...n,
+              children: [],
+              loading: false,
+              error: err?.message || "加载失败",
+            })),
+          );
+        })
+        .finally(() => {
+          inflightRef.current.delete(path);
+        });
+    },
+    [rootNodes, expandedNodes, loadChildren, updateNodeAtPath],
   );
 
   const handleCheck = useCallback(
     (node: TreeNode, checked: boolean) => {
-      const affectedPaths = getAllPaths(node);
       if (checked) {
-        const next = [...selectedPaths];
-        for (const path of affectedPaths) {
-          if (!next.includes(path)) {
-            next.push(path);
-          }
+        if (!selectedPaths.includes(node.path)) {
+          onSelectedPathsChange([...selectedPaths, node.path]);
         }
-        onSelectedPathsChange(next);
-        return;
+      } else {
+        onSelectedPathsChange(selectedPaths.filter((p) => p !== node.path));
       }
-
-      const affectedPathSet = new Set(affectedPaths);
-      onSelectedPathsChange(selectedPaths.filter((path) => {
-        if (affectedPathSet.has(path)) {
-          return false;
-        }
-        return !isAncestorPath(path, node.path);
-      }));
     },
     [onSelectedPathsChange, selectedPaths],
   );
@@ -151,10 +223,6 @@ export function SnapshotTreeBrowser({
     );
   }
 
-  const errorMessage = browseMutation.isError
-    ? getErrorMessage(browseMutation.error)
-    : browseMutation.data?.error;
-
   return (
     <div className="overflow-hidden rounded-md border bg-card">
       <div className="flex items-center justify-between gap-2 border-b bg-muted/50 px-3 py-2">
@@ -164,39 +232,39 @@ export function SnapshotTreeBrowser({
           variant="ghost"
           size="icon"
           className="h-7 w-7 shrink-0"
-          disabled={!isAgentOnline || browseMutation.isPending}
+          disabled={!isAgentOnline || rootLoading}
           onClick={handleRefresh}
           aria-label="刷新快照内容"
         >
-          <RefreshCw className={cn("h-3.5 w-3.5", browseMutation.isPending && "animate-spin")} />
+          <RefreshCw className={cn("h-3.5 w-3.5", rootLoading && "animate-spin")} />
         </Button>
       </div>
 
       <div className="max-h-[350px] overflow-y-auto">
-        {browseMutation.isPending ? (
+        {rootLoading ? (
           <LoadingRows />
-        ) : errorMessage ? (
+        ) : rootError ? (
           <div className="p-4">
             <Alert variant="destructive">
               <AlertCircle className="h-4 w-4" />
               <AlertTitle>无法读取快照内容</AlertTitle>
               <AlertDescription className="text-xs">
-                {errorMessage || "请求超时或 Agent 异常"}
+                {rootError}
               </AlertDescription>
             </Alert>
           </div>
-        ) : tree.length === 0 ? (
+        ) : rootNodes.length === 0 ? (
           <div className="p-8 text-center text-sm text-muted-foreground">快照为空</div>
         ) : (
           <div className="py-1">
-            {tree.map((node) => (
+            {rootNodes.map((node) => (
               <TreeNodeRow
                 key={node.path}
                 node={node}
                 depth={0}
                 expandedNodes={expandedNodes}
-                onToggle={handleToggleNode}
-                checkedStateFor={getCheckedState}
+                onToggle={handleToggle}
+                selectedPathSet={selectedPathSet}
                 onCheck={handleCheck}
               />
             ))}
@@ -229,18 +297,19 @@ function TreeNodeRow({
   depth,
   expandedNodes,
   onToggle,
-  checkedStateFor,
+  selectedPathSet,
   onCheck,
 }: {
   node: TreeNode;
   depth: number;
   expandedNodes: Set<string>;
   onToggle: (path: string) => void;
-  checkedStateFor: (node: TreeNode) => boolean | "indeterminate";
+  selectedPathSet: Set<string>;
   onCheck: (node: TreeNode, checked: boolean) => void;
 }) {
   const isDir = node.type === "dir";
   const isExpanded = expandedNodes.has(node.path);
+  const checked = selectedPathSet.has(node.path);
 
   return (
     <>
@@ -256,7 +325,13 @@ function TreeNodeRow({
             onClick={() => onToggle(node.path)}
             aria-label={`${isExpanded ? "折叠" : "展开"} ${node.path}`}
           >
-            {isExpanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+            {node.loading ? (
+              <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+            ) : isExpanded ? (
+              <ChevronDown className="h-3.5 w-3.5" />
+            ) : (
+              <ChevronRight className="h-3.5 w-3.5" />
+            )}
           </button>
         ) : (
           <span className="h-5 w-5 shrink-0" aria-hidden="true" />
@@ -269,9 +344,7 @@ function TreeNodeRow({
             isDir ? "cursor-pointer" : "cursor-default",
           )}
           onClick={() => {
-            if (isDir) {
-              onToggle(node.path);
-            }
+            if (isDir) onToggle(node.path);
           }}
           disabled={!isDir}
         >
@@ -292,16 +365,25 @@ function TreeNodeRow({
         </span>
 
         <Checkbox
-          checked={checkedStateFor(node)}
+          checked={checked}
           onCheckedChange={(value) => onCheck(node, value === true)}
           className="shrink-0"
           aria-label={`选择 ${node.path}`}
         />
       </div>
 
-      {isDir && isExpanded && (
+      {isDir && isExpanded && node.error && (
+        <div
+          className="px-2 py-1 text-[10px] text-destructive"
+          style={{ paddingLeft: `${(depth + 1) * 16 + 28}px` }}
+        >
+          {node.error}
+        </div>
+      )}
+
+      {isDir && isExpanded && node.children !== null && (
         <>
-          {node.children.length === 0 ? (
+          {node.children.length === 0 && !node.loading && !node.error ? (
             <div
               className="px-2 py-1 text-[10px] text-muted-foreground"
               style={{ paddingLeft: `${(depth + 1) * 16 + 28}px` }}
@@ -316,7 +398,7 @@ function TreeNodeRow({
                 depth={depth + 1}
                 expandedNodes={expandedNodes}
                 onToggle={onToggle}
-                checkedStateFor={checkedStateFor}
+                selectedPathSet={selectedPathSet}
                 onCheck={onCheck}
               />
             ))
@@ -338,39 +420,11 @@ function LoadingRows() {
   );
 }
 
-function buildTree(entries: SnapshotFileEntry[]): TreeNode[] {
-  const roots: TreeNode[] = [];
-  const nodeMap = new Map<string, TreeNode>();
-
-  for (const entry of [...entries].sort((a, b) => a.path.localeCompare(b.path))) {
-    const node: TreeNode = {
-      name: getPathName(entry.path),
-      path: entry.path,
-      type: entry.type,
-      size: entry.size,
-      mtime: entry.mtime,
-      children: [],
-    };
-    nodeMap.set(entry.path, node);
-
-    const parentPath = getParentPath(entry.path);
-    const parent = parentPath ? nodeMap.get(parentPath) : undefined;
-    if (parent) {
-      parent.children.push(node);
-    } else {
-      roots.push(node);
-    }
-  }
-
-  return roots;
-}
-
-function getAllPaths(node: TreeNode): string[] {
-  return [node.path, ...node.children.flatMap((child) => getAllPaths(child))];
-}
-
-function getDescendantPaths(node: TreeNode): string[] {
-  return node.children.flatMap((child) => getAllPaths(child));
+function sortEntries(entries: SnapshotFileEntry[]): SnapshotFileEntry[] {
+  return [...entries].sort((a, b) => {
+    if (a.type !== b.type) return a.type === "dir" ? -1 : 1;
+    return a.path.localeCompare(b.path);
+  });
 }
 
 function getPathName(path: string): string {
@@ -378,44 +432,21 @@ function getPathName(path: string): string {
   return parts[parts.length - 1] || path;
 }
 
-function getParentPath(path: string): string | null {
-  const parts = path.split("/").filter(Boolean);
-  if (parts.length <= 1) {
-    return null;
+function findNode(nodes: TreeNode[], path: string): TreeNode | null {
+  for (const node of nodes) {
+    if (node.path === path) return node;
+    if (node.children) {
+      const found = findNode(node.children, path);
+      if (found) return found;
+    }
   }
-  const prefix = path.startsWith("/") ? "/" : "";
-  return `${prefix}${parts.slice(0, -1).join("/")}`;
-}
-
-function isAncestorPath(candidate: string, path: string): boolean {
-  if (candidate === path) {
-    return false;
-  }
-  if (candidate === "/") {
-    return path !== "/";
-  }
-  return path.startsWith(candidate.endsWith("/") ? candidate : `${candidate}/`);
+  return null;
 }
 
 function formatSize(bytes: number): string {
-  if (bytes === 0) {
-    return "";
-  }
-  if (bytes < 1024) {
-    return `${bytes} B`;
-  }
-  if (bytes < 1024 * 1024) {
-    return `${(bytes / 1024).toFixed(1)} KB`;
-  }
-  if (bytes < 1024 * 1024 * 1024) {
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  }
+  if (bytes === 0) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
-}
-
-function getErrorMessage(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message || "请求超时或 Agent 异常";
-  }
-  return "请求超时或 Agent 异常";
 }

@@ -22,6 +22,7 @@ type SnapshotBrowseHandler struct {
 
 type snapshotBrowseRequest struct {
 	SnapshotID string `json:"snapshot_id" binding:"required"`
+	Path       string `json:"path"`
 }
 
 func NewSnapshotBrowseHandler(database *db.Database, hub BrowseHub) *SnapshotBrowseHandler {
@@ -67,6 +68,7 @@ func (h *SnapshotBrowseHandler) BrowseSnapshot(c *gin.Context) {
 
 	msg, err := protocol.NewMessage(protocol.TypeSnapshotBrowseReq, protocol.SnapshotBrowseReqPayload{
 		SnapshotID: request.SnapshotID,
+		Path:       request.Path,
 	})
 	if err != nil {
 		writeErrorResponse(c, http.StatusInternalServerError, "encode snapshot browse request")

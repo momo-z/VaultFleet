@@ -155,9 +155,14 @@ func (r ResticRunner) buildSnapshotsCmdContext(ctx context.Context) *exec.Cmd {
 	return r.command(ctx, args...)
 }
 
-func (r ResticRunner) buildLsSnapshotCmdContext(ctx context.Context, snapshotID string) *exec.Cmd {
+func (r ResticRunner) buildLsSnapshotCmdContext(ctx context.Context, snapshotID string, paths ...string) *exec.Cmd {
 	args := []string{"ls", snapshotID, "--json"}
 	args = append(args, r.baseArgs()...)
+	for _, p := range paths {
+		if p != "" {
+			args = append(args, p)
+		}
+	}
 	return r.command(ctx, args...)
 }
 
@@ -292,8 +297,8 @@ func (r ResticRunner) ListSnapshots(ctx context.Context) ([]SnapshotInfo, error)
 	return snapshots, nil
 }
 
-func (r ResticRunner) LsSnapshot(ctx context.Context, snapshotID string) ([]SnapshotFileEntry, error) {
-	cmd := r.buildLsSnapshotCmdContext(ctx, snapshotID)
+func (r ResticRunner) LsSnapshot(ctx context.Context, snapshotID string, paths ...string) ([]SnapshotFileEntry, error) {
+	cmd := r.buildLsSnapshotCmdContext(ctx, snapshotID, paths...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
