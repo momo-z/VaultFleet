@@ -135,6 +135,8 @@ func buildRuntimeWithOptions(ctx context.Context, database *db.Database, options
 	}
 	wsHandler.AgentStateUpdater = api.NewAgentStateUpdater(database)
 	wsHandler.HeartbeatStateUpdater = api.NewHeartbeatStateUpdater(database)
+	wsHandler.MasterVersion = version
+	wsHandler.GitHubRepo = "momo-z/VaultFleet"
 	go commandService.RunTimeoutScanner(ctx, options.commandTimeoutScanInterval)
 	bus.Subscribe(events.PolicyChanged, policyPusher.Handle)
 	router := api.NewRouter(api.RouterConfig{
