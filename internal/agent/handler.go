@@ -75,6 +75,7 @@ type Handler struct {
 	restoreRunner            RestoreRunnerFunc
 	snapshotListRunner       SnapshotListRunnerFunc
 	snapshotBrowseRunner     SnapshotBrowseRunnerFunc
+	snapshotCache            *snapshotCache
 	dirSizeFunc              DirSizeFunc
 	agentVersion             string
 	updater                  AgentUpdater
@@ -142,6 +143,7 @@ func NewHandler(config HandlerConfig) *Handler {
 		restoreRunner:            restoreRunner,
 		snapshotListRunner:       snapshotListRunner,
 		snapshotBrowseRunner:     snapshotBrowseRunner,
+		snapshotCache:            newSnapshotCache(configDir),
 		dirSizeFunc:              dirSizeFunc,
 		agentVersion:             config.AgentVersion,
 		updater:                  config.Updater,
@@ -929,6 +931,29 @@ func (h *Handler) sendSnapshotListResp(messageID string, agentID string, snapsho
 	}
 }
 
+func (h *Handler) snapshotEntriesForBrowse(ctx context.Context, cfg executor.ExecutorConfig, snapshotID string) ([]executor.SnapshotFileEntry, error) {
+	if h.snapshotCache != nil {
+		entries, ok, err := h.snapshotCache.Get(snapshotID)
+		if err != nil {
+			log.Printf("read snapshot cache %s failed: %v", snapshotID, err)
+		} else if ok {
+			return entries, nil
+		}
+	}
+
+	entries, err := h.snapshotBrowseRunner(ctx, cfg, snapshotID, "")
+	if err != nil {
+		return nil, err
+	}
+
+	if h.snapshotCache != nil {
+		if err := h.snapshotCache.Put(snapshotID, entries); err != nil {
+			log.Printf("write snapshot cache %s failed: %v", snapshotID, err)
+		}
+	}
+	return entries, nil
+}
+
 func (h *Handler) handleSnapshotBrowseReq(msg protocol.Message) {
 	req, err := protocol.ParsePayload[protocol.SnapshotBrowseReqPayload](&msg)
 	if err != nil {
@@ -954,8 +979,9 @@ func (h *Handler) handleSnapshotBrowseReq(msg protocol.Message) {
 
 	snapshotID := req.SnapshotID
 	path := req.Path
+	cfg := executorConfigForPolicy(h.configDir, policyPayload)
 	_ = h.tasks.Start(msg.ID, taskTypeQuery, func(ctx context.Context) {
-		entries, err := h.snapshotBrowseRunner(ctx, executorConfigForPolicy(h.configDir, policyPayload), snapshotID, path)
+		entries, err := h.snapshotEntriesForBrowse(ctx, cfg, snapshotID)
 		if err != nil {
 			h.sendSnapshotBrowseResp(msg.ID, snapshotID, nil, err.Error())
 			return

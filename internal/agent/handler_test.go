@@ -1479,6 +1479,104 @@ func TestHandleSnapshotBrowseInvokesRunnerAndSendsResponseWithSameID(t *testing.
 	assert.Equal(t, protocol.SnapshotFileEntry{Path: "/srv", Type: "dir", Size: 0, Mtime: "2026-05-22T08:00:00Z"}, payload.Entries[0])
 }
 
+func TestHandleSnapshotBrowseUsesCacheWhenAvailable(t *testing.T) {
+	store := policy.NewStore(t.TempDir())
+	configDir := t.TempDir()
+	require.NoError(t, store.SavePolicy(&protocol.PolicyPushPayload{
+		AgentID: "agent-1",
+		Storage: protocol.StorageConfig{RepoPath: "repo/agent-1"},
+	}))
+	cache := newSnapshotCache(configDir)
+	require.NoError(t, cache.Put("snap-1", []executor.SnapshotFileEntry{
+		{Path: "/srv", Type: "dir", Size: 0},
+		{Path: "/srv/app", Type: "dir", Size: 0},
+		{Path: "/srv/app/main.go", Type: "file", Size: 100},
+		{Path: "/srv/data.db", Type: "file", Size: 4096},
+	}))
+
+	var runnerCalls atomic.Int32
+	sent := &sentMessages{}
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: store,
+		ConfigDir:   configDir,
+		SendFunc:    sent.send,
+		SnapshotBrowseRunner: func(context.Context, executor.ExecutorConfig, string, string) ([]executor.SnapshotFileEntry, error) {
+			runnerCalls.Add(1)
+			return nil, errors.New("runner should not be called")
+		},
+	})
+	msg, err := protocol.NewMessage(protocol.TypeSnapshotBrowseReq, protocol.SnapshotBrowseReqPayload{
+		SnapshotID: "snap-1",
+		Path:       "/srv",
+	})
+	require.NoError(t, err)
+
+	handler.Handle(*msg)
+
+	respMsg := waitForMessageType(t, sent, protocol.TypeSnapshotBrowseResp, time.Second)
+	payload, err := protocol.ParsePayload[protocol.SnapshotBrowseRespPayload](&respMsg)
+	require.NoError(t, err)
+	assert.Empty(t, payload.Error)
+	assert.Equal(t, int32(0), runnerCalls.Load())
+	require.Len(t, payload.Entries, 2)
+	assert.Equal(t, "/srv/app", payload.Entries[0].Path)
+	assert.Equal(t, "/srv/data.db", payload.Entries[1].Path)
+}
+
+func TestHandleSnapshotBrowseFetchesFullTreeOnCacheMissAndStoresIt(t *testing.T) {
+	store := policy.NewStore(t.TempDir())
+	configDir := t.TempDir()
+	require.NoError(t, store.SavePolicy(&protocol.PolicyPushPayload{
+		AgentID: "agent-1",
+		Storage: protocol.StorageConfig{RepoPath: "repo/agent-1"},
+	}))
+
+	fullEntries := []executor.SnapshotFileEntry{
+		{Path: "/srv", Type: "dir", Size: 0},
+		{Path: "/srv/app", Type: "dir", Size: 0},
+		{Path: "/srv/app/main.go", Type: "file", Size: 100},
+		{Path: "/srv/data.db", Type: "file", Size: 4096},
+	}
+	var runnerMu sync.Mutex
+	var runnerPaths []string
+	sent := &sentMessages{}
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: store,
+		ConfigDir:   configDir,
+		SendFunc:    sent.send,
+		SnapshotBrowseRunner: func(_ context.Context, _ executor.ExecutorConfig, _ string, path string) ([]executor.SnapshotFileEntry, error) {
+			runnerMu.Lock()
+			runnerPaths = append(runnerPaths, path)
+			runnerMu.Unlock()
+			return append([]executor.SnapshotFileEntry(nil), fullEntries...), nil
+		},
+	})
+	msg, err := protocol.NewMessage(protocol.TypeSnapshotBrowseReq, protocol.SnapshotBrowseReqPayload{
+		SnapshotID: "snap-1",
+		Path:       "/srv",
+	})
+	require.NoError(t, err)
+
+	handler.Handle(*msg)
+
+	respMsg := waitForMessageType(t, sent, protocol.TypeSnapshotBrowseResp, time.Second)
+	payload, err := protocol.ParsePayload[protocol.SnapshotBrowseRespPayload](&respMsg)
+	require.NoError(t, err)
+	assert.Empty(t, payload.Error)
+	require.Len(t, payload.Entries, 2)
+	assert.Equal(t, "/srv/app", payload.Entries[0].Path)
+	assert.Equal(t, "/srv/data.db", payload.Entries[1].Path)
+
+	runnerMu.Lock()
+	assert.Equal(t, []string{""}, runnerPaths)
+	runnerMu.Unlock()
+
+	cached, ok, err := newSnapshotCache(configDir).Get("snap-1")
+	require.NoError(t, err)
+	require.True(t, ok)
+	assert.Equal(t, fullEntries, cached)
+}
+
 func TestHandleSnapshotBrowseRunnerFailureSendsErrorPayload(t *testing.T) {
 	store := policy.NewStore(t.TempDir())
 	require.NoError(t, store.SavePolicy(&protocol.PolicyPushPayload{
