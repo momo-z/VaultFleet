@@ -1,6 +1,7 @@
 package selfupdate
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -157,4 +158,143 @@ func TestConcurrentUpdateCallsAreSafe(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+type restartCommandCall struct {
+	name string
+	args []string
+}
+
+func withRestartDeps(
+	t *testing.T,
+	lookup func(string) (string, error),
+	start func(string, ...string) error,
+	exit func(int),
+	execFn func(string, []string, []string) error,
+) {
+	t.Helper()
+
+	oldLookPath := lookPath
+	oldStartCommand := startCommand
+	oldExitProcess := exitProcess
+	oldExecProcess := execProcess
+
+	lookPath = lookup
+	startCommand = start
+	exitProcess = exit
+	execProcess = execFn
+
+	t.Cleanup(func() {
+		lookPath = oldLookPath
+		startCommand = oldStartCommand
+		exitProcess = oldExitProcess
+		execProcess = oldExecProcess
+	})
+}
+
+func TestDefaultRestartUsesSystemctlWhenAvailable(t *testing.T) {
+	var started restartCommandCall
+	exitCode := -1
+
+	withRestartDeps(
+		t,
+		func(name string) (string, error) {
+			if name == "systemctl" {
+				return "/sbin/systemctl", nil
+			}
+			return "", exec.ErrNotFound
+		},
+		func(name string, args ...string) error {
+			started = restartCommandCall{name: name, args: append([]string(nil), args...)}
+			return nil
+		},
+		func(code int) {
+			exitCode = code
+		},
+		func(string, []string, []string) error {
+			t.Fatal("unexpected re-exec")
+			return nil
+		},
+	)
+
+	err := defaultRestart("/usr/local/bin/vaultfleet-agent")()
+	require.NoError(t, err)
+	assert.Equal(t, restartCommandCall{
+		name: "/sbin/systemctl",
+		args: []string{"restart", "vaultfleet-agent"},
+	}, started)
+	assert.Equal(t, 0, exitCode)
+}
+
+func TestDefaultRestartUsesOpenRCWhenSystemctlUnavailable(t *testing.T) {
+	var started restartCommandCall
+	exitCode := -1
+
+	withRestartDeps(
+		t,
+		func(name string) (string, error) {
+			if name == "rc-service" {
+				return "/sbin/rc-service", nil
+			}
+			return "", exec.ErrNotFound
+		},
+		func(name string, args ...string) error {
+			started = restartCommandCall{name: name, args: append([]string(nil), args...)}
+			return nil
+		},
+		func(code int) {
+			exitCode = code
+		},
+		func(string, []string, []string) error {
+			t.Fatal("unexpected re-exec")
+			return nil
+		},
+	)
+
+	err := defaultRestart("/usr/local/bin/vaultfleet-agent")()
+	require.NoError(t, err)
+	assert.Equal(t, restartCommandCall{
+		name: "/sbin/rc-service",
+		args: []string{"vaultfleet-agent", "restart"},
+	}, started)
+	assert.Equal(t, 0, exitCode)
+}
+
+func TestDefaultRestartReexecsBinaryWhenNoServiceManager(t *testing.T) {
+	originalArgs := os.Args
+	os.Args = []string{"vaultfleet-agent", "--config", "/boot/config/plugins/vaultfleet/agent.yaml"}
+	t.Cleanup(func() {
+		os.Args = originalArgs
+	})
+
+	wantErr := errors.New("exec failed")
+	var gotPath string
+	var gotArgv []string
+	var gotEnv []string
+
+	withRestartDeps(
+		t,
+		func(string) (string, error) {
+			return "", exec.ErrNotFound
+		},
+		func(string, ...string) error {
+			t.Fatal("unexpected service restart")
+			return nil
+		},
+		func(int) {
+			t.Fatal("unexpected exit")
+		},
+		func(path string, argv []string, env []string) error {
+			gotPath = path
+			gotArgv = append([]string(nil), argv...)
+			gotEnv = append([]string(nil), env...)
+			return wantErr
+		},
+	)
+
+	err := defaultRestart("/usr/local/bin/vaultfleet-agent")()
+	require.ErrorIs(t, err, wantErr)
+	assert.Equal(t, "/usr/local/bin/vaultfleet-agent", gotPath)
+	assert.Equal(t, os.Args, gotArgv)
+	assert.Equal(t, os.Environ(), gotEnv)
 }

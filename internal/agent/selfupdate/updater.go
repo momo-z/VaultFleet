@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -29,6 +30,15 @@ type Config struct {
 	Arch           string
 }
 
+var (
+	lookPath     = exec.LookPath
+	startCommand = func(name string, args ...string) error {
+		return exec.Command(name, args...).Start()
+	}
+	exitProcess = os.Exit
+	execProcess = syscall.Exec
+)
+
 func NewUpdater(config Config) *Updater {
 	if config.Arch == "" {
 		config.Arch = runtime.GOARCH
@@ -37,7 +47,46 @@ func NewUpdater(config Config) *Updater {
 		config:      config,
 		httpClient:  &http.Client{Timeout: 5 * time.Minute},
 		execCommand: exec.Command,
-		restart:     func() error { return exec.Command("systemctl", "restart", "vaultfleet-agent").Run() },
+		restart:     defaultRestart(config.BinaryPath),
+	}
+}
+
+// defaultRestart returns a restart function that detects the init system
+// and uses the appropriate restart mechanism.
+// Priority: systemctl > rc-service > syscall.Exec (re-exec self)
+func defaultRestart(binaryPath string) func() error {
+	return func() error {
+		// 1. systemd: use Start() + os.Exit so the process exits cleanly
+		// before systemd sends SIGTERM. Using .Run() would block until
+		// systemd kills us, causing a spurious "signal: terminated" error.
+		if path, err := lookPath("systemctl"); err == nil {
+			log.Printf("self-update: restarting via systemctl")
+			if err := startCommand(path, "restart", "vaultfleet-agent"); err != nil {
+				return fmt.Errorf("systemctl restart: %w", err)
+			}
+			log.Printf("self-update: systemctl restart issued, exiting for clean restart")
+			exitProcess(0)
+			return nil
+		}
+		// 2. OpenRC: same approach, fire the restart command then exit.
+		if path, err := lookPath("rc-service"); err == nil {
+			log.Printf("self-update: restarting via rc-service")
+			if err := startCommand(path, "vaultfleet-agent", "restart"); err != nil {
+				return fmt.Errorf("rc-service restart: %w", err)
+			}
+			log.Printf("self-update: rc-service restart issued, exiting for clean restart")
+			exitProcess(0)
+			return nil
+		}
+		// 3. No service manager (e.g. Unraid): re-exec the binary in place.
+		// syscall.Exec replaces the current process with the new binary,
+		// preserving the original command-line arguments. No zombie processes.
+		log.Printf("self-update: no service manager found, re-exec %s", binaryPath)
+		argv := os.Args
+		if len(argv) == 0 {
+			argv = []string{binaryPath}
+		}
+		return execProcess(binaryPath, argv, os.Environ())
 	}
 }
 
