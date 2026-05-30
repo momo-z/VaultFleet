@@ -20,6 +20,7 @@ import (
 	"vaultfleet/internal/master/events"
 	"vaultfleet/internal/master/ws"
 	"vaultfleet/pkg/protocol"
+	"vaultfleet/pkg/rcloneobscure"
 )
 
 func TestRouterAssemblyAuthCheckUninitialized(t *testing.T) {
@@ -249,6 +250,33 @@ func TestCurrentPolicyLookupUnsyncedPolicyReturnsPolicyPushWithDecryptedCredenti
 	}, payload.Storage.RcloneConfig)
 	assert.Equal(t, []string{"/etc"}, payload.BackupDirs)
 	assert.Equal(t, protocol.RetentionPolicy{KeepLast: 3}, payload.Retention)
+}
+
+func TestCurrentPolicyLookupObscuresSFTPPasswordForAgent(t *testing.T) {
+	database := newRouterAssemblyDatabase(t)
+	agent := createStorageTestAgent(t, database, "v.ps")
+	storage := db.StorageConfig{
+		Name:       "hz_box",
+		RcloneType: "sftp",
+		RcloneConfig: mustEncryptMap(t, database, map[string]any{
+			"host": "u575095.your-storagebox.de",
+			"user": "u575095",
+			"pass": "clear-sftp-password",
+			"port": "22",
+		}),
+	}
+	require.NoError(t, database.DB.Create(&storage).Error)
+	createStorageTestPolicy(t, database, agent.ID, storage.ID, false)
+
+	msg, ok := CurrentPolicyLookup(database)(agent.ID)
+
+	require.True(t, ok)
+	payload, err := protocol.ParsePayload[protocol.PolicyPushPayload](msg)
+	require.NoError(t, err)
+	assert.NotEqual(t, "clear-sftp-password", payload.Storage.RcloneConfig["pass"])
+	revealed, err := rcloneobscure.RevealPass(payload.Storage.RcloneConfig["pass"])
+	require.NoError(t, err)
+	assert.Equal(t, "clear-sftp-password", revealed)
 }
 
 func TestCurrentPolicyLookupMovesS3BucketIntoRepoPath(t *testing.T) {

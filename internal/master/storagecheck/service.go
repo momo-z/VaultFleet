@@ -2,18 +2,15 @@ package storagecheck
 
 import (
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
-	"encoding/base64"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+
+	"vaultfleet/pkg/rcloneobscure"
 )
 
 type Runner interface {
@@ -157,7 +154,7 @@ func rcloneConfigContents(request Request) (string, error) {
 		if shouldOmitConfigKey(request.RcloneType, key) {
 			continue
 		}
-		value, err := rcloneConfigValue(request.RcloneType, key, request.RcloneConfig[key])
+		value, err := rcloneobscure.ConfigValue(key, request.RcloneConfig[key])
 		if err != nil {
 			return "", err
 		}
@@ -241,13 +238,6 @@ func containsLineBreak(value string) bool {
 	return strings.ContainsAny(value, "\r\n")
 }
 
-func rcloneConfigValue(configType string, key string, value string) (string, error) {
-	if configType == "webdav" && key == "pass" && value != "" {
-		return obscureRcloneValue(value)
-	}
-	return value, nil
-}
-
 func (s *Service) redactError(err error, request Request) string {
 	message := err.Error()
 	values := secretValuesByLength(request.RcloneConfig)
@@ -287,34 +277,4 @@ func IsSecretConfigKey(key string) bool {
 		strings.Contains(normalized, "private_key") ||
 		strings.Contains(normalized, "key_pem") ||
 		strings.HasSuffix(normalized, "_key")
-}
-
-var rcloneObscureKey = []byte{
-	0x9c, 0x93, 0x5b, 0x48, 0x73, 0x0a, 0x55, 0x4d,
-	0x6b, 0xfd, 0x7c, 0x63, 0xc8, 0x86, 0xa9, 0x2b,
-	0xd3, 0x90, 0x19, 0x8e, 0xb8, 0x12, 0x8a, 0xfb,
-	0xf4, 0xde, 0x16, 0x2b, 0x8b, 0x95, 0xf6, 0x38,
-}
-
-func obscureRcloneValue(value string) (string, error) {
-	plaintext := []byte(value)
-	ciphertext := make([]byte, aes.BlockSize+len(plaintext))
-	iv := ciphertext[:aes.BlockSize]
-	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
-		return "", fmt.Errorf("generate rclone obscure iv: %w", err)
-	}
-	if err := cryptRcloneValue(ciphertext[aes.BlockSize:], plaintext, iv); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(ciphertext), nil
-}
-
-func cryptRcloneValue(out []byte, in []byte, iv []byte) error {
-	block, err := aes.NewCipher(rcloneObscureKey)
-	if err != nil {
-		return fmt.Errorf("create rclone obscure cipher: %w", err)
-	}
-	stream := cipher.NewCTR(block, iv)
-	stream.XORKeyStream(out, in)
-	return nil
 }

@@ -20,6 +20,7 @@ import (
 	"vaultfleet/internal/agent/policy"
 	agentscheduler "vaultfleet/internal/agent/scheduler"
 	"vaultfleet/pkg/protocol"
+	"vaultfleet/pkg/rcloneobscure"
 )
 
 func TestHandlePolicyPushSavesPolicyWritesConfigSchedulesBackupAndAcks(t *testing.T) {
@@ -631,6 +632,46 @@ func TestHandleBackupNowLoadsPolicyRunsBackupAndSendsTaskResult(t *testing.T) {
 	assert.Equal(t, int64(4096), result.RepoSize)
 	assert.False(t, result.StartedAt.IsZero())
 	assert.Equal(t, result.StartedAt.Add(1500*time.Millisecond), result.FinishedAt)
+}
+
+func TestHandleBackupNowRefreshesRcloneConfWithObscuredSFTPPassword(t *testing.T) {
+	store := policy.NewStore(t.TempDir())
+	configDir := t.TempDir()
+	require.NoError(t, store.SavePolicy(&protocol.PolicyPushPayload{
+		AgentID: "agent-1",
+		Storage: protocol.StorageConfig{
+			RcloneType: "sftp",
+			RcloneConfig: map[string]string{
+				"host": "sftp.example.test",
+				"user": "vaultfleet",
+				"pass": "clear-sftp-password",
+			},
+			RepoPath: "vaultfleet/agent-1",
+		},
+		BackupDirs: []string{"/srv"},
+	}))
+	sent := &sentMessages{}
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: store,
+		ConfigDir:   configDir,
+		SendFunc:    sent.send,
+		BackupRunnerWithProgress: func(_ context.Context, _ executor.ExecutorConfig, _ executor.ProgressCallback) executor.TaskResult {
+			return executor.TaskResult{Type: "backup", Status: "success", DurationMs: 10}
+		},
+	})
+	msg, err := protocol.NewMessage(protocol.TypeBackupNow, protocol.BackupNowPayload{AgentID: "agent-1"})
+	require.NoError(t, err)
+
+	handler.Handle(*msg)
+
+	waitForMessageType(t, sent, protocol.TypeTaskResult, time.Second)
+	rcloneConf, err := os.ReadFile(filepath.Join(configDir, "rclone.conf"))
+	require.NoError(t, err)
+	assert.NotContains(t, string(rcloneConf), "clear-sftp-password")
+	passValue := strings.TrimPrefix(strings.Split(strings.Split(string(rcloneConf), "pass = ")[1], "\n")[0], "")
+	revealed, err := rcloneobscure.RevealPass(passValue)
+	require.NoError(t, err)
+	assert.Equal(t, "clear-sftp-password", revealed)
 }
 
 func TestHandleBackupNowUsesLegacyBackupRunnerWhenProgressRunnerUnset(t *testing.T) {

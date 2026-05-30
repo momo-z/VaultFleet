@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -565,6 +566,11 @@ func (h *Handler) runBackupForPolicy(ctx context.Context, messageID string, agen
 	}
 
 	startedAt := time.Now()
+	if err := h.ensureRcloneConf(policyPayload); err != nil {
+		log.Printf("prepare rclone config failed: %v", err)
+		h.sendTaskResultWithID(messageID, h.failedTaskResult(agentID, "prepare rclone config: "+err.Error(), startedAt))
+		return
+	}
 	cfg := executorConfigForPolicy(h.configDir, policyPayload)
 	result := h.backupRunnerWithProgress(ctx, cfg, h.backupProgressCallback(messageID, agentID))
 	if ctx.Err() == context.Canceled {
@@ -814,6 +820,22 @@ func executorConfigForPolicy(configDir string, policyPayload *protocol.PolicyPus
 		Retention:  toExecutorRetention(policyPayload.Retention),
 		RcloneArgs: copyStringMap(policyPayload.Storage.RcloneArgs),
 	}
+}
+
+func (h *Handler) ensureRcloneConf(policyPayload *protocol.PolicyPushPayload) error {
+	if policyPayload == nil {
+		return errors.New("policy payload is nil")
+	}
+	if h.configDir == "" {
+		return errors.New("config dir not configured")
+	}
+	if err := os.MkdirAll(h.configDir, 0o700); err != nil {
+		return err
+	}
+	return executor.WriteRcloneConf(filepath.Join(h.configDir, "rclone.conf"), executor.RcloneConfig{
+		Type:   policyPayload.Storage.RcloneType,
+		Params: policyPayload.Storage.RcloneConfig,
+	})
 }
 
 func copyStringMap(values map[string]string) map[string]string {

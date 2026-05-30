@@ -17,6 +17,7 @@ import (
 	"vaultfleet/internal/master/logbuf"
 	"vaultfleet/internal/master/storagecheck"
 	"vaultfleet/pkg/protocol"
+	"vaultfleet/pkg/rcloneobscure"
 )
 
 type RouterHub interface {
@@ -343,6 +344,10 @@ func policyPushPayload(database *db.Database, policy db.BackupPolicy, storage db
 	}
 	repoPath := policyRepoPath(storage.RcloneType, rcloneConfig, policy.RepoPath)
 	rcloneConfig = storageRcloneConfig(storage.RcloneType, rcloneConfig)
+	rcloneConfig, err = rcloneobscure.PrepareConfigForAgent(rcloneConfig)
+	if err != nil {
+		return protocol.PolicyPushPayload{}, err
+	}
 
 	var backupDirs []string
 	if err := json.Unmarshal([]byte(policy.BackupDirs), &backupDirs); err != nil {
