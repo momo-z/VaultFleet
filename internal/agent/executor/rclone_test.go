@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"vaultfleet/pkg/rcloneobscure"
 )
 
 func TestGenerateRcloneConfS3SortedOutput(t *testing.T) {
@@ -47,6 +49,40 @@ func TestGenerateRcloneConfS3SortedOutput(t *testing.T) {
 	}
 }
 
+func TestGenerateRcloneConfSFTPPasswordObscured(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rclone.conf")
+	config := RcloneConfig{
+		Type: "sftp",
+		Params: map[string]string{
+			"host": "sftp.example.test",
+			"user": "vaultfleet",
+			"pass": "clear-sftp-password",
+			"port": "22",
+		},
+	}
+
+	if err := WriteRcloneConf(path, config); err != nil {
+		t.Fatalf("WriteRcloneConf() error = %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read generated config: %v", err)
+	}
+
+	passValue := configValue(t, string(got), "pass")
+	if passValue == "clear-sftp-password" {
+		t.Fatalf("sftp pass was written in clear text")
+	}
+	revealed, err := rcloneobscure.RevealPass(passValue)
+	if err != nil {
+		t.Fatalf("reveal generated sftp pass: %v", err)
+	}
+	if revealed != "clear-sftp-password" {
+		t.Fatalf("revealed pass = %q, want original secret", revealed)
+	}
+}
+
 func TestGenerateRcloneConfWebDAVContent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "rclone.conf")
 	config := RcloneConfig{
@@ -84,7 +120,7 @@ func TestGenerateRcloneConfWebDAVContent(t *testing.T) {
 	if passValue == "clear-webdav-password" {
 		t.Fatalf("webdav pass was written in clear text")
 	}
-	revealed, err := revealRcloneObscured(passValue)
+	revealed, err := rcloneobscure.RevealPass(passValue)
 	if err != nil {
 		t.Fatalf("reveal generated webdav pass: %v", err)
 	}

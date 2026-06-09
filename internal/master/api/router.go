@@ -17,6 +17,7 @@ import (
 	"vaultfleet/internal/master/logbuf"
 	"vaultfleet/internal/master/storagecheck"
 	"vaultfleet/pkg/protocol"
+	"vaultfleet/pkg/rcloneobscure"
 )
 
 type RouterHub interface {
@@ -343,6 +344,18 @@ func policyPushPayload(database *db.Database, policy db.BackupPolicy, storage db
 	}
 	repoPath := policyRepoPath(storage.RcloneType, rcloneConfig, policy.RepoPath)
 	rcloneConfig = storageRcloneConfig(storage.RcloneType, rcloneConfig)
+	rclonePassObscured := false
+	supportsPlaintextPass, err := agentSupportsPlaintextRclonePass(database, policy.AgentID)
+	if err != nil {
+		return protocol.PolicyPushPayload{}, err
+	}
+	if !supportsPlaintextPass {
+		rcloneConfig, err = rcloneobscure.PrepareConfigForLegacyAgent(rcloneConfig)
+		if err != nil {
+			return protocol.PolicyPushPayload{}, err
+		}
+		rclonePassObscured = true
+	}
 
 	var backupDirs []string
 	if err := json.Unmarshal([]byte(policy.BackupDirs), &backupDirs); err != nil {
@@ -369,10 +382,11 @@ func policyPushPayload(database *db.Database, policy db.BackupPolicy, storage db
 	return protocol.PolicyPushPayload{
 		AgentID: policy.AgentID,
 		Storage: protocol.StorageConfig{
-			RcloneType:   storage.RcloneType,
-			RcloneConfig: rcloneConfig,
-			RepoPath:     repoPath,
-			RcloneArgs:   rcloneArgs,
+			RcloneType:         storage.RcloneType,
+			RcloneConfig:       rcloneConfig,
+			RepoPath:           repoPath,
+			RcloneArgs:         rcloneArgs,
+			RclonePassObscured: rclonePassObscured,
 		},
 		ResticPassword:  resticPassword,
 		BackupDirs:      backupDirs,

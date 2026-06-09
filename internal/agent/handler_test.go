@@ -20,6 +20,7 @@ import (
 	"vaultfleet/internal/agent/policy"
 	agentscheduler "vaultfleet/internal/agent/scheduler"
 	"vaultfleet/pkg/protocol"
+	"vaultfleet/pkg/rcloneobscure"
 )
 
 func TestHandlePolicyPushSavesPolicyWritesConfigSchedulesBackupAndAcks(t *testing.T) {
@@ -101,6 +102,50 @@ func TestHandlePolicyPushSavesPolicyWritesConfigSchedulesBackupAndAcks(t *testin
 		Excludes:   []string{"*.tmp"},
 		Retention:  executor.RetentionPolicy{KeepLast: 3, KeepDaily: 7},
 	}, runnerConfig)
+}
+
+func TestHandlePolicyPushPreservesLegacyObscuredSFTPPassword(t *testing.T) {
+	store := policy.NewStore(t.TempDir())
+	configDir := filepath.Join(t.TempDir(), "config")
+	scheduler := &recordingScheduler{}
+	sent := &sentMessages{}
+	legacyPass, err := rcloneobscure.ObscurePass("clear-sftp-password")
+	require.NoError(t, err)
+
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: store,
+		ConfigDir:   configDir,
+		Scheduler:   scheduler,
+		SendFunc:    sent.send,
+		BackupRunnerWithProgress: func(_ context.Context, _ executor.ExecutorConfig, _ executor.ProgressCallback) executor.TaskResult {
+			return executor.TaskResult{Type: "backup", Status: "success", DurationMs: 25, SnapshotID: "snap-1"}
+		},
+	})
+	msg, err := protocol.NewMessage(protocol.TypePolicyPush, protocol.PolicyPushPayload{
+		AgentID: "agent-1",
+		Storage: protocol.StorageConfig{
+			RcloneType:         "sftp",
+			RclonePassObscured: true,
+			RcloneConfig: map[string]string{
+				"host": "sftp.example.test",
+				"user": "vaultfleet",
+				"pass": legacyPass,
+			},
+			RepoPath: "vaultfleet/agent-1",
+		},
+		BackupDirs: []string{"/srv"},
+	})
+	require.NoError(t, err)
+
+	handler.Handle(*msg)
+
+	rcloneConf, err := os.ReadFile(filepath.Join(configDir, "rclone.conf"))
+	require.NoError(t, err)
+	passValue := rcloneConfValue(t, string(rcloneConf), "pass")
+	assert.Equal(t, legacyPass, passValue)
+	revealed, err := rcloneobscure.RevealPass(passValue)
+	require.NoError(t, err)
+	assert.Equal(t, "clear-sftp-password", revealed)
 }
 
 func TestNewHandlerRestoresSavedPolicySchedule(t *testing.T) {
@@ -631,6 +676,90 @@ func TestHandleBackupNowLoadsPolicyRunsBackupAndSendsTaskResult(t *testing.T) {
 	assert.Equal(t, int64(4096), result.RepoSize)
 	assert.False(t, result.StartedAt.IsZero())
 	assert.Equal(t, result.StartedAt.Add(1500*time.Millisecond), result.FinishedAt)
+}
+
+func TestHandleBackupNowRefreshesRcloneConfWithObscuredSFTPPassword(t *testing.T) {
+	store := policy.NewStore(t.TempDir())
+	configDir := t.TempDir()
+	require.NoError(t, store.SavePolicy(&protocol.PolicyPushPayload{
+		AgentID: "agent-1",
+		Storage: protocol.StorageConfig{
+			RcloneType: "sftp",
+			RcloneConfig: map[string]string{
+				"host": "sftp.example.test",
+				"user": "vaultfleet",
+				"pass": "clear-sftp-password",
+			},
+			RepoPath: "vaultfleet/agent-1",
+		},
+		BackupDirs: []string{"/srv"},
+	}))
+	sent := &sentMessages{}
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: store,
+		ConfigDir:   configDir,
+		SendFunc:    sent.send,
+		BackupRunnerWithProgress: func(_ context.Context, _ executor.ExecutorConfig, _ executor.ProgressCallback) executor.TaskResult {
+			return executor.TaskResult{Type: "backup", Status: "success", DurationMs: 10}
+		},
+	})
+	msg, err := protocol.NewMessage(protocol.TypeBackupNow, protocol.BackupNowPayload{AgentID: "agent-1"})
+	require.NoError(t, err)
+
+	handler.Handle(*msg)
+
+	waitForMessageType(t, sent, protocol.TypeTaskResult, time.Second)
+	rcloneConf, err := os.ReadFile(filepath.Join(configDir, "rclone.conf"))
+	require.NoError(t, err)
+	assert.NotContains(t, string(rcloneConf), "clear-sftp-password")
+	passValue := strings.TrimPrefix(strings.Split(strings.Split(string(rcloneConf), "pass = ")[1], "\n")[0], "")
+	revealed, err := rcloneobscure.RevealPass(passValue)
+	require.NoError(t, err)
+	assert.Equal(t, "clear-sftp-password", revealed)
+}
+
+func TestHandleBackupNowPreservesLegacyObscuredSFTPPassword(t *testing.T) {
+	store := policy.NewStore(t.TempDir())
+	configDir := t.TempDir()
+	legacyPass, err := rcloneobscure.ObscurePass("clear-sftp-password")
+	require.NoError(t, err)
+
+	require.NoError(t, store.SavePolicy(&protocol.PolicyPushPayload{
+		AgentID: "agent-1",
+		Storage: protocol.StorageConfig{
+			RcloneType:         "sftp",
+			RclonePassObscured: true,
+			RcloneConfig: map[string]string{
+				"host": "sftp.example.test",
+				"user": "vaultfleet",
+				"pass": legacyPass,
+			},
+			RepoPath: "vaultfleet/agent-1",
+		},
+		BackupDirs: []string{"/srv"},
+	}))
+	sent := &sentMessages{}
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: store,
+		ConfigDir:   configDir,
+		SendFunc:    sent.send,
+		BackupRunnerWithProgress: func(_ context.Context, _ executor.ExecutorConfig, _ executor.ProgressCallback) executor.TaskResult {
+			return executor.TaskResult{Type: "backup", Status: "success", DurationMs: 10}
+		},
+	})
+	msg, err := protocol.NewMessage(protocol.TypeBackupNow, protocol.BackupNowPayload{AgentID: "agent-1"})
+	require.NoError(t, err)
+
+	handler.Handle(*msg)
+
+	waitForMessageType(t, sent, protocol.TypeTaskResult, time.Second)
+	rcloneConf, err := os.ReadFile(filepath.Join(configDir, "rclone.conf"))
+	require.NoError(t, err)
+	passValue := rcloneConfValue(t, string(rcloneConf), "pass")
+	assert.Equal(t, legacyPass, passValue)
+	revealed, err := rcloneobscure.RevealPass(passValue)
+	require.NoError(t, err)
+	assert.Equal(t, "clear-sftp-password", revealed)
 }
 
 func TestHandleBackupNowUsesLegacyBackupRunnerWhenProgressRunnerUnset(t *testing.T) {
@@ -1338,6 +1467,49 @@ func TestHandleRestoreInvokesRunnerAndSendsSuccessTaskResult(t *testing.T) {
 	assert.False(t, result.FinishedAt.Before(result.StartedAt))
 }
 
+func TestHandleRestoreRefreshesRcloneConfWithObscuredSFTPPassword(t *testing.T) {
+	store := policy.NewStore(t.TempDir())
+	configDir := t.TempDir()
+	require.NoError(t, store.SavePolicy(&protocol.PolicyPushPayload{
+		AgentID: "agent-1",
+		Storage: protocol.StorageConfig{
+			RcloneType: "sftp",
+			RcloneConfig: map[string]string{
+				"host": "sftp.example.test",
+				"user": "vaultfleet",
+				"pass": "clear-sftp-password",
+			},
+			RepoPath: "vaultfleet/agent-1",
+		},
+	}))
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "rclone.conf"), []byte("[vaultfleet]\ntype = sftp\npass = stale-clear\n"), 0o600))
+	sent := &sentMessages{}
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: store,
+		ConfigDir:   configDir,
+		SendFunc:    sent.send,
+		RestoreRunner: func(_ context.Context, _ executor.ExecutorConfig, _ string, _ string, _ []string) error {
+			return nil
+		},
+	})
+	msg, err := protocol.NewMessage(protocol.TypeRestoreReq, protocol.RestoreReqPayload{
+		SnapshotID: "snap-1",
+		Target:     "/restore/target",
+	})
+	require.NoError(t, err)
+
+	handler.Handle(*msg)
+
+	waitForMessageType(t, sent, protocol.TypeTaskResult, time.Second)
+	rcloneConf, err := os.ReadFile(filepath.Join(configDir, "rclone.conf"))
+	require.NoError(t, err)
+	passValue := rcloneConfValue(t, string(rcloneConf), "pass")
+	assert.NotEqual(t, "stale-clear", passValue)
+	revealed, err := rcloneobscure.RevealPass(passValue)
+	require.NoError(t, err)
+	assert.Equal(t, "clear-sftp-password", revealed)
+}
+
 func TestHandleRestoreRunnerFailureSendsFailedTaskResult(t *testing.T) {
 	store := policy.NewStore(t.TempDir())
 	require.NoError(t, store.SavePolicy(&protocol.PolicyPushPayload{
@@ -1545,6 +1717,46 @@ func TestHandleSnapshotListStartsAsyncAndDoesNotBlockHandle(t *testing.T) {
 
 	releaseRunner()
 	waitForMessageType(t, sent, protocol.TypeSnapshotListResp, time.Second)
+}
+
+func TestHandleSnapshotListRefreshesRcloneConfWithObscuredSFTPPassword(t *testing.T) {
+	store := policy.NewStore(t.TempDir())
+	configDir := t.TempDir()
+	require.NoError(t, store.SavePolicy(&protocol.PolicyPushPayload{
+		AgentID: "agent-1",
+		Storage: protocol.StorageConfig{
+			RcloneType: "sftp",
+			RcloneConfig: map[string]string{
+				"host": "sftp.example.test",
+				"user": "vaultfleet",
+				"pass": "clear-sftp-password",
+			},
+			RepoPath: "vaultfleet/agent-1",
+		},
+	}))
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "rclone.conf"), []byte("[vaultfleet]\ntype = sftp\npass = stale-clear\n"), 0o600))
+	sent := &sentMessages{}
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: store,
+		ConfigDir:   configDir,
+		SendFunc:    sent.send,
+		SnapshotListRunner: func(_ context.Context, _ executor.ExecutorConfig) ([]executor.SnapshotInfo, error) {
+			return []executor.SnapshotInfo{{ID: "snap-1"}}, nil
+		},
+	})
+	msg, err := protocol.NewMessage(protocol.TypeSnapshotListReq, protocol.SnapshotListReqPayload{AgentID: "agent-1"})
+	require.NoError(t, err)
+
+	handler.Handle(*msg)
+
+	waitForMessageType(t, sent, protocol.TypeSnapshotListResp, time.Second)
+	rcloneConf, err := os.ReadFile(filepath.Join(configDir, "rclone.conf"))
+	require.NoError(t, err)
+	passValue := rcloneConfValue(t, string(rcloneConf), "pass")
+	assert.NotEqual(t, "stale-clear", passValue)
+	revealed, err := rcloneobscure.RevealPass(passValue)
+	require.NoError(t, err)
+	assert.Equal(t, "clear-sftp-password", revealed)
 }
 
 func TestHandleSnapshotListMissingPolicySendsErrorPayload(t *testing.T) {
@@ -1794,6 +2006,46 @@ func TestHandleSnapshotBrowseStartsAsyncAndDoesNotBlockHandle(t *testing.T) {
 
 	releaseRunner()
 	waitForMessageType(t, sent, protocol.TypeSnapshotBrowseResp, time.Second)
+}
+
+func TestHandleSnapshotBrowseRefreshesRcloneConfWithObscuredSFTPPassword(t *testing.T) {
+	store := policy.NewStore(t.TempDir())
+	configDir := t.TempDir()
+	require.NoError(t, store.SavePolicy(&protocol.PolicyPushPayload{
+		AgentID: "agent-1",
+		Storage: protocol.StorageConfig{
+			RcloneType: "sftp",
+			RcloneConfig: map[string]string{
+				"host": "sftp.example.test",
+				"user": "vaultfleet",
+				"pass": "clear-sftp-password",
+			},
+			RepoPath: "vaultfleet/agent-1",
+		},
+	}))
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "rclone.conf"), []byte("[vaultfleet]\ntype = sftp\npass = stale-clear\n"), 0o600))
+	sent := &sentMessages{}
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: store,
+		ConfigDir:   configDir,
+		SendFunc:    sent.send,
+		SnapshotBrowseRunner: func(_ context.Context, _ executor.ExecutorConfig, _ string, _ string) ([]executor.SnapshotFileEntry, error) {
+			return []executor.SnapshotFileEntry{{Path: "/srv", Type: "dir"}}, nil
+		},
+	})
+	msg, err := protocol.NewMessage(protocol.TypeSnapshotBrowseReq, protocol.SnapshotBrowseReqPayload{SnapshotID: "snap-1"})
+	require.NoError(t, err)
+
+	handler.Handle(*msg)
+
+	waitForMessageType(t, sent, protocol.TypeSnapshotBrowseResp, time.Second)
+	rcloneConf, err := os.ReadFile(filepath.Join(configDir, "rclone.conf"))
+	require.NoError(t, err)
+	passValue := rcloneConfValue(t, string(rcloneConf), "pass")
+	assert.NotEqual(t, "stale-clear", passValue)
+	revealed, err := rcloneobscure.RevealPass(passValue)
+	require.NoError(t, err)
+	assert.Equal(t, "clear-sftp-password", revealed)
 }
 
 func TestHandleSnapshotBrowseResponseTooLargeSendsErrorPayload(t *testing.T) {
@@ -2177,6 +2429,18 @@ func assertFileMode(t *testing.T, path string, want os.FileMode) {
 	info, err := os.Stat(path)
 	require.NoError(t, err)
 	assert.Equal(t, want, info.Mode().Perm())
+}
+
+func rcloneConfValue(t *testing.T, config string, key string) string {
+	t.Helper()
+	for _, line := range strings.Split(config, "\n") {
+		prefix := key + " = "
+		if strings.HasPrefix(line, prefix) {
+			return strings.TrimPrefix(line, prefix)
+		}
+	}
+	t.Fatalf("config key %q not found in %q", key, config)
+	return ""
 }
 
 func writeAgentFakeRestic(t *testing.T, dir string, stdout string) string {

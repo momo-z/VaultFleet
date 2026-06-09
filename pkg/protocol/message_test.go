@@ -59,7 +59,8 @@ func TestPolicyPushPayload(t *testing.T) {
 	policy := PolicyPushPayload{
 		AgentID: "agent-001",
 		Storage: StorageConfig{
-			RcloneType: "s3",
+			RcloneType:         "s3",
+			RclonePassObscured: true,
 			RcloneConfig: map[string]string{
 				"provider":          "Cloudflare",
 				"access_key_id":     "AKID",
@@ -89,6 +90,7 @@ func TestPolicyPushPayload(t *testing.T) {
 	assert.Equal(t, "SECRET", parsed.Storage.RcloneConfig["secret_access_key"])
 	assert.Equal(t, "https://xxx.r2.cloudflarestorage.com", parsed.Storage.RcloneConfig["endpoint"])
 	assert.Equal(t, "backups", parsed.Storage.RcloneConfig["bucket"])
+	assert.True(t, parsed.Storage.RclonePassObscured)
 	assert.Equal(t, "vaultfleet/agent-001", parsed.Storage.RepoPath)
 	assert.Equal(t, "secure-password", parsed.ResticPassword)
 	assert.Equal(t, []string{"/etc", "/home", "/opt/myapp/data"}, parsed.BackupDirs)

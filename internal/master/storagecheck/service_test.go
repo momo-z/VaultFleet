@@ -2,9 +2,6 @@ package storagecheck
 
 import (
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
-	"encoding/base64"
 	"errors"
 	"os"
 	"slices"
@@ -14,6 +11,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"vaultfleet/pkg/rcloneobscure"
 )
 
 type fakeRunner struct {
@@ -223,6 +222,39 @@ func TestServiceRedactsOverlappingSecretsByLongestFirst(t *testing.T) {
 	assert.NotContains(t, result.Error, "abc")
 }
 
+func TestServiceObscuresSFTPPasswordInTempConfig(t *testing.T) {
+	runner := &fakeRunner{
+		t: t,
+		onRun: func(t *testing.T, _ context.Context, configPath string) error {
+			t.Helper()
+
+			contents, err := os.ReadFile(configPath)
+			require.NoError(t, err)
+
+			config := string(contents)
+			assert.NotContains(t, config, "clear-sftp-pass")
+			passValue := requireConfigValue(t, config, "pass")
+			assert.NotEmpty(t, passValue)
+			assert.NotEqual(t, "clear-sftp-pass", passValue)
+			revealedPass := revealRcloneObscuredForTest(t, passValue)
+			assert.Equal(t, "clear-sftp-pass", revealedPass)
+			return nil
+		},
+	}
+	service := NewService(runner)
+
+	result := service.Test(context.Background(), Request{
+		RcloneType: "sftp",
+		RcloneConfig: map[string]string{
+			"host": "sftp.example.test",
+			"user": "vaultfleet",
+			"pass": "clear-sftp-pass",
+		},
+	})
+
+	assert.True(t, result.OK)
+}
+
 func TestServiceObscuresWebDAVPasswordInTempConfig(t *testing.T) {
 	runner := &fakeRunner{
 		t: t,
@@ -337,23 +369,7 @@ func requireConfigValue(t *testing.T, config string, key string) string {
 func revealRcloneObscuredForTest(t *testing.T, value string) string {
 	t.Helper()
 
-	rcloneObscureKeyForTest := []byte{
-		0x9c, 0x93, 0x5b, 0x48, 0x73, 0x0a, 0x55, 0x4d,
-		0x6b, 0xfd, 0x7c, 0x63, 0xc8, 0x86, 0xa9, 0x2b,
-		0xd3, 0x90, 0x19, 0x8e, 0xb8, 0x12, 0x8a, 0xfb,
-		0xf4, 0xde, 0x16, 0x2b, 0x8b, 0x95, 0xf6, 0x38,
-	}
-
-	ciphertext, err := base64.RawURLEncoding.DecodeString(value)
+	revealed, err := rcloneobscure.RevealPass(value)
 	require.NoError(t, err)
-	require.GreaterOrEqual(t, len(ciphertext), aes.BlockSize)
-
-	iv := ciphertext[:aes.BlockSize]
-	buf := append([]byte(nil), ciphertext[aes.BlockSize:]...)
-	block, err := aes.NewCipher(rcloneObscureKeyForTest)
-	require.NoError(t, err)
-
-	stream := cipher.NewCTR(block, iv)
-	stream.XORKeyStream(buf, buf)
-	return string(buf)
+	return revealed
 }

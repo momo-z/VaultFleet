@@ -15,6 +15,10 @@ func agentHasCapability(database *db.Database, agentID string, capability string
 	return systemInfoHasCapability(agent.SystemInfo, capability), nil
 }
 
+func agentSupportsPlaintextRclonePass(database *db.Database, agentID string) (bool, error) {
+	return agentHasCapability(database, agentID, protocol.CapabilityPolicyPlaintextRclonePass)
+}
+
 func systemInfoHasCapability(raw string, capability string) bool {
 	info := parseAgentSystemInfoMap(raw)
 	capabilities, ok := info["capabilities"].([]any)
