@@ -127,6 +127,7 @@ func collectSystemInfo(version string) string {
 		Capabilities: []string{
 			protocol.CapabilitySnapshotBrowse,
 			protocol.CapabilityRestoreIncludePaths,
+			protocol.CapabilityPolicyPlaintextRclonePass,
 		},
 	})
 	if err != nil {

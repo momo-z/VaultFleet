@@ -35,8 +35,9 @@ const (
 )
 
 const (
-	CapabilitySnapshotBrowse      = "snapshot_browse"
-	CapabilityRestoreIncludePaths = "restore_include_paths"
+	CapabilitySnapshotBrowse            = "snapshot_browse"
+	CapabilityRestoreIncludePaths       = "restore_include_paths"
+	CapabilityPolicyPlaintextRclonePass = "policy_plaintext_rclone_pass"
 )
 
 // Message is the shared WebSocket envelope used by master and agents.
@@ -193,10 +194,11 @@ type PolicyPushPayload struct {
 
 // StorageConfig contains rclone and repository settings for a backup policy.
 type StorageConfig struct {
-	RcloneType   string            `json:"rclone_type"`
-	RcloneConfig map[string]string `json:"rclone_config"`
-	RepoPath     string            `json:"repo_path"`
-	RcloneArgs   map[string]string `json:"rclone_args,omitempty"`
+	RcloneType         string            `json:"rclone_type"`
+	RcloneConfig       map[string]string `json:"rclone_config"`
+	RepoPath           string            `json:"repo_path"`
+	RcloneArgs         map[string]string `json:"rclone_args,omitempty"`
+	RclonePassObscured bool              `json:"rclone_pass_obscured,omitempty"`
 }
 
 // RetentionPolicy maps directly to restic forget retention options.

@@ -10,8 +10,9 @@ import (
 )
 
 type RcloneConfig struct {
-	Type   string
-	Params map[string]string
+	Type         string
+	Params       map[string]string
+	PassObscured bool
 }
 
 func WriteRcloneConf(path string, config RcloneConfig) error {
@@ -26,7 +27,7 @@ func WriteRcloneConf(path string, config RcloneConfig) error {
 	sort.Strings(keys)
 
 	for _, key := range keys {
-		value, err := rcloneobscure.ConfigValue(key, config.Params[key])
+		value, err := rcloneobscure.ConfigValue(key, config.Params[key], config.PassObscured)
 		if err != nil {
 			return err
 		}

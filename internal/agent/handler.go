@@ -333,8 +333,9 @@ func (h *Handler) stagePolicyFiles(pushedPolicy *protocol.PolicyPushPayload) (*s
 	}
 	staged := &stagedPolicyFiles{rclonePath: rclonePath}
 	if err := executor.WriteRcloneConf(rclonePath, executor.RcloneConfig{
-		Type:   pushedPolicy.Storage.RcloneType,
-		Params: pushedPolicy.Storage.RcloneConfig,
+		Type:         pushedPolicy.Storage.RcloneType,
+		Params:       pushedPolicy.Storage.RcloneConfig,
+		PassObscured: pushedPolicy.Storage.RclonePassObscured,
 	}); err != nil {
 		staged.cleanup()
 		return nil, err
@@ -833,8 +834,9 @@ func (h *Handler) ensureRcloneConf(policyPayload *protocol.PolicyPushPayload) er
 		return err
 	}
 	return executor.WriteRcloneConf(filepath.Join(h.configDir, "rclone.conf"), executor.RcloneConfig{
-		Type:   policyPayload.Storage.RcloneType,
-		Params: policyPayload.Storage.RcloneConfig,
+		Type:         policyPayload.Storage.RcloneType,
+		Params:       policyPayload.Storage.RcloneConfig,
+		PassObscured: policyPayload.Storage.RclonePassObscured,
 	})
 }
 
@@ -919,6 +921,10 @@ func (h *Handler) handleRestoreReq(msg protocol.Message) {
 
 	startErr := h.tasks.Start(msg.ID, taskTypeRestore, func(ctx context.Context) {
 		startedAt := time.Now()
+		if err := h.ensureRcloneConf(policyPayload); err != nil {
+			h.sendTaskResultWithID(msg.ID, h.failedTypedTaskResult(agentID, "restore", req.SnapshotID, "prepare rclone config: "+err.Error(), startedAt))
+			return
+		}
 		h.sendRestoreProgress(msg.ID, agentID, req.SnapshotID)
 		err := h.restoreRunner(ctx, executorConfigForPolicy(h.configDir, policyPayload), req.SnapshotID, req.Target, req.IncludePaths)
 		finishedAt := time.Now()
@@ -997,6 +1003,10 @@ func (h *Handler) handleSnapshotListReq(msg protocol.Message) {
 
 	finalAgentID := agentID
 	_ = h.tasks.Start(msg.ID, taskTypeQuery, func(ctx context.Context) {
+		if err := h.ensureRcloneConf(policyPayload); err != nil {
+			h.sendSnapshotListResp(msg.ID, finalAgentID, nil, "prepare rclone config: "+err.Error())
+			return
+		}
 		snapshots, err := h.snapshotListRunner(ctx, executorConfigForPolicy(h.configDir, policyPayload))
 		if err != nil {
 			h.sendSnapshotListResp(msg.ID, finalAgentID, nil, err.Error())
@@ -1073,6 +1083,10 @@ func (h *Handler) handleSnapshotBrowseReq(msg protocol.Message) {
 	path := req.Path
 	cfg := executorConfigForPolicy(h.configDir, policyPayload)
 	_ = h.tasks.Start(msg.ID, taskTypeQuery, func(ctx context.Context) {
+		if err := h.ensureRcloneConf(policyPayload); err != nil {
+			h.sendSnapshotBrowseResp(msg.ID, snapshotID, nil, "prepare rclone config: "+err.Error())
+			return
+		}
 		entries, err := h.snapshotEntriesForBrowse(ctx, cfg, snapshotID)
 		if err != nil {
 			h.sendSnapshotBrowseResp(msg.ID, snapshotID, nil, err.Error())

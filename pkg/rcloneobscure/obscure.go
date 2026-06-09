@@ -18,39 +18,31 @@ var obscureKey = []byte{
 }
 
 // ConfigValue returns the value to write into rclone.conf.
-func ConfigValue(key, value string) (string, error) {
+func ConfigValue(key, value string, passObscured bool) (string, error) {
 	if key == "pass" && value != "" {
-		return ObscurePassIfNeeded(value)
+		if passObscured {
+			return value, nil
+		}
+		return ObscurePass(value)
 	}
 	return value, nil
 }
 
-// PrepareConfigForAgent obscures pass fields before sending config to an agent.
-func PrepareConfigForAgent(config map[string]string) (map[string]string, error) {
+// PrepareConfigForLegacyAgent obscures pass fields before sending config to a
+// legacy agent that expects rclone.conf-ready values in policy payloads.
+func PrepareConfigForLegacyAgent(config map[string]string) (map[string]string, error) {
 	if len(config) == 0 {
 		return config, nil
 	}
 	prepared := make(map[string]string, len(config))
 	for key, value := range config {
-		next, err := ConfigValue(key, value)
+		next, err := ConfigValue(key, value, false)
 		if err != nil {
 			return nil, err
 		}
 		prepared[key] = next
 	}
 	return prepared, nil
-}
-
-// ObscurePassIfNeeded returns an rclone-obscured password, preserving values
-// that are already obscured so older and newer agents stay compatible.
-func ObscurePassIfNeeded(value string) (string, error) {
-	if value == "" {
-		return "", nil
-	}
-	if _, err := RevealPass(value); err == nil {
-		return value, nil
-	}
-	return ObscurePass(value)
 }
 
 // ObscurePass returns an rclone-obscured password for plain text input.

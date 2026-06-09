@@ -154,7 +154,7 @@ func rcloneConfigContents(request Request) (string, error) {
 		if shouldOmitConfigKey(request.RcloneType, key) {
 			continue
 		}
-		value, err := rcloneobscure.ConfigValue(key, request.RcloneConfig[key])
+		value, err := rcloneobscure.ConfigValue(key, request.RcloneConfig[key], false)
 		if err != nil {
 			return "", err
 		}
