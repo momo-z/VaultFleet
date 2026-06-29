@@ -179,6 +179,11 @@ func (r PlainRunner) Unlock(_ context.Context) error {
 	return nil
 }
 
+// RunMaintenance is unsupported for plain backups (no restic repository).
+func (r PlainRunner) RunMaintenance(_ context.Context, _ MaintenanceOp) (string, error) {
+	return "", fmt.Errorf("maintenance not supported for plain backups")
+}
+
 // ListSnapshots returns a single synthetic snapshot representing the
 // current state of the plain backup.
 func (r PlainRunner) ListSnapshots(ctx context.Context) ([]SnapshotInfo, error) {
