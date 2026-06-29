@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -275,6 +276,16 @@ func (r ResticRunner) buildRestoreCmdWithIncludesContext(ctx context.Context, sn
 func (r ResticRunner) command(ctx context.Context, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "restic", args...)
 	cmd.Env = r.baseEnv()
+	// On context cancellation, send SIGTERM (not the default SIGKILL) so restic
+	// can stop at a safe point and clean up its own repository lock. If it does
+	// not exit within WaitDelay, the process is force-killed to avoid hanging.
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return cmd.Process.Signal(syscall.SIGTERM)
+	}
+	cmd.WaitDelay = 30 * time.Second
 	return cmd
 }
 

@@ -1100,3 +1100,37 @@ func prependPath(t *testing.T, dir string) {
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
+
+func TestCommandSendsSigtermOnContextCancel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("signal behavior test not supported on windows")
+	}
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "got-term")
+
+	// fake restic: 捕获 TERM，写标记文件后退出；否则睡到被杀。
+	script := "#!/bin/sh\n" +
+		"trap 'touch " + marker + "; exit 0' TERM\n" +
+		"sleep 5 &\n" +
+		"wait\n"
+	if err := os.WriteFile(filepath.Join(dir, "restic"), []byte(script), 0o700); err != nil {
+		t.Fatalf("write fake restic: %v", err)
+	}
+	prependPath(t, dir)
+
+	pwFile := writeTempPasswordFile(t, "secret")
+	runner := ResticRunner{RcloneConfPath: "/tmp/rclone.conf", PasswordFile: pwFile, RepoPath: "repo"}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := runner.command(ctx, "snapshots")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+	_ = cmd.Wait()
+
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("fake restic did not receive SIGTERM (marker missing): %v", err)
+	}
+}
