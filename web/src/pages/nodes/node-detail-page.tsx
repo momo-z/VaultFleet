@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { getAgent, backupNow } from "@/services/agents";
+import { getAgent, backupNow, triggerMaintenance } from "@/services/agents";
 import { listPolicies } from "@/services/policies";
 import { copyToClipboard } from "@/lib/utils";
 import { listTasks } from "@/services/tasks";
@@ -18,6 +18,7 @@ import { Play, RotateCcw, Info, CheckCircle2, AlertCircle, ChevronDown, ChevronU
 import { ConfirmDialog } from "@/components/confirm-dialog";
 import { toast } from "sonner";
 import { Snapshot } from "@/types/snapshot";
+import { MaintenanceOperation, MaintenanceOperationInfo, MAINTENANCE_OPERATIONS } from "@/types/maintenance";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -41,6 +42,7 @@ export function NodeDetailPage() {
   const [confirmed, setConfirmed] = useState(false);
   const [expandedTaskId, setExpandedTaskId] = useState<string | null>(null);
   const [confirmBackupOpen, setConfirmBackupOpen] = useState(false);
+  const [confirmMaintenance, setConfirmMaintenance] = useState<MaintenanceOperationInfo | null>(null);
 
   const { data: agent, isLoading: agentLoading } = useQuery({
     queryKey: ["agent", agentId],
@@ -96,7 +98,7 @@ export function NodeDetailPage() {
   });
 
   const restoreMutation = useMutation({
-    mutationFn: (body: { snapshot_id: string; target_path: string }) => 
+    mutationFn: (body: { snapshot_id: string; target_path: string }) =>
       restoreSnapshot(agentId!, body),
     onSuccess: (data) => {
       const msg = data.message === "restore queued" ? "恢复命令已排队" : "恢复任务已开始";
@@ -107,6 +109,22 @@ export function NodeDetailPage() {
     },
     onError: (error: any) => {
       toast.error("发起恢复失败", { description: error.message });
+    }
+  });
+
+  const maintenanceMutation = useMutation({
+    mutationFn: (op: MaintenanceOperation) => triggerMaintenance(agentId!, op),
+    onSuccess: (data) => {
+      if (agent?.status === "online") {
+        toast.success("维护命令已下发", { description: `Message ID: ${data.message_id}` });
+      } else {
+        toast.info("维护命令已排队", { description: "Agent 上线后将自动执行" });
+      }
+      queryClient.invalidateQueries({ queryKey: ["tasks"] });
+      queryClient.invalidateQueries({ queryKey: ["commands"] });
+    },
+    onError: (error: any) => {
+      toast.error("发起维护失败", { description: error.message });
     }
   });
 
@@ -122,6 +140,14 @@ export function NodeDetailPage() {
     setSelectedSnapshot(s);
     setTargetPath(s.paths[0] || "");
     setConfirmed(false);
+  };
+
+  const handleMaintenanceClick = (op: MaintenanceOperationInfo) => {
+    if (op.danger) {
+      setConfirmMaintenance(op);
+    } else {
+      maintenanceMutation.mutate(op.key);
+    }
   };
 
   return (
@@ -415,6 +441,57 @@ export function NodeDetailPage() {
           </Card>
         </TabsContent>
       </Tabs>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>仓库维护</CardTitle>
+          <CardDescription>对节点备份仓库执行维护操作。请在执行前阅读每项操作的说明。</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {MAINTENANCE_OPERATIONS.map((op) => (
+            <div
+              key={op.key}
+              className="flex items-start justify-between gap-4 rounded-lg border p-3"
+            >
+              <div className="space-y-1">
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  {op.label}
+                  {op.danger && (
+                    <span className="rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-semibold text-red-600">
+                      危险操作
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-muted-foreground">{op.description}</p>
+              </div>
+              <Button
+                variant={op.danger ? "destructive" : "outline"}
+                size="sm"
+                disabled={maintenanceMutation.isPending}
+                onClick={() => handleMaintenanceClick(op)}
+              >
+                执行
+              </Button>
+            </div>
+          ))}
+        </CardContent>
+      </Card>
+
+      <ConfirmDialog
+        open={!!confirmMaintenance}
+        onOpenChange={(open) => !open && setConfirmMaintenance(null)}
+        title={`确认${confirmMaintenance?.label ?? ""}`}
+        description={confirmMaintenance?.description ?? ""}
+        variant="destructive"
+        loading={maintenanceMutation.isPending}
+        confirmText="确认执行"
+        onConfirm={() => {
+          if (confirmMaintenance) {
+            maintenanceMutation.mutate(confirmMaintenance.key);
+            setConfirmMaintenance(null);
+          }
+        }}
+      />
 
       <Dialog open={!!selectedSnapshot} onOpenChange={(open) => !open && setSelectedSnapshot(null)}>
         <DialogContent>
