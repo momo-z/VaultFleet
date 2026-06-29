@@ -246,6 +246,26 @@ func (r ResticRunner) buildForgetCmdContext(ctx context.Context, retention Reten
 	return r.command(ctx, args...)
 }
 
+func (r ResticRunner) buildCheckCmdContext(ctx context.Context) *exec.Cmd {
+	args := append([]string{"check"}, r.baseArgs()...)
+	return r.command(ctx, args...)
+}
+
+func (r ResticRunner) buildRepairIndexCmdContext(ctx context.Context) *exec.Cmd {
+	args := append([]string{"repair", "index"}, r.baseArgs()...)
+	return r.command(ctx, args...)
+}
+
+func (r ResticRunner) buildRepairSnapshotsCmdContext(ctx context.Context) *exec.Cmd {
+	args := append([]string{"repair", "snapshots", "--forget"}, r.baseArgs()...)
+	return r.command(ctx, args...)
+}
+
+func (r ResticRunner) buildPruneCmdContext(ctx context.Context) *exec.Cmd {
+	args := append([]string{"prune"}, r.baseArgs()...)
+	return r.command(ctx, args...)
+}
+
 func (r ResticRunner) buildSnapshotsCmdContext(ctx context.Context) *exec.Cmd {
 	args := []string{"snapshots", "--json"}
 	args = append(args, r.baseReadOnlyArgs()...)

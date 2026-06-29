@@ -1195,3 +1195,29 @@ func TestUnlockReturnsErrorOnResticFailure(t *testing.T) {
 		t.Fatalf("Unlock() error = %q, want it to mention 'run restic unlock'", err.Error())
 	}
 }
+
+func TestBuildMaintenanceCmds(t *testing.T) {
+	pwFile := writeTempPasswordFile(t, "secret")
+	runner := ResticRunner{RcloneConfPath: "/tmp/rclone.conf", PasswordFile: pwFile, RepoPath: "repo"}
+	base := []string{
+		"-r", "rclone:vaultfleet:repo",
+		"--password-file", pwFile,
+		"-o", "rclone.args=serve restic --stdio --config /tmp/rclone.conf",
+	}
+	cases := []struct {
+		name string
+		cmd  func() []string
+		head []string
+	}{
+		{"check", func() []string { return runner.buildCheckCmdContext(context.Background()).Args }, []string{"restic", "check"}},
+		{"repair_index", func() []string { return runner.buildRepairIndexCmdContext(context.Background()).Args }, []string{"restic", "repair", "index"}},
+		{"repair_snapshots", func() []string { return runner.buildRepairSnapshotsCmdContext(context.Background()).Args }, []string{"restic", "repair", "snapshots", "--forget"}},
+		{"prune", func() []string { return runner.buildPruneCmdContext(context.Background()).Args }, []string{"restic", "prune"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			want := append(append([]string{}, tc.head...), base...)
+			assertArgsEqual(t, tc.cmd(), want)
+		})
+	}
+}
