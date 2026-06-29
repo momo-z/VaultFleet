@@ -425,11 +425,17 @@ type recordingRunner struct {
 	repoSize    int64
 	statsErr    error
 	restoreErr  error
+	unlockErr   error
 }
 
 func (r *recordingRunner) InitRepo(context.Context) error {
 	r.calls = append(r.calls, "init")
 	return r.initErr
+}
+
+func (r *recordingRunner) Unlock(context.Context) error {
+	r.calls = append(r.calls, "unlock")
+	return r.unlockErr
 }
 
 func (r *recordingRunner) RunBackup(_ context.Context, dirs []string, excludes []string) (string, error) {
@@ -499,6 +505,11 @@ func (r *plainRecordingRunner) InitRepo(context.Context) error {
 	return nil
 }
 
+func (r *plainRecordingRunner) Unlock(context.Context) error {
+	r.calls = append(r.calls, "unlock")
+	return nil
+}
+
 func (r *plainRecordingRunner) RunBackup(context.Context, []string, []string) (string, error) {
 	r.calls = append(r.calls, "backup")
 	return "", r.backupErr
@@ -522,6 +533,17 @@ func (r *plainRecordingRunner) RepositorySize(context.Context) (int64, error) {
 func (r *plainRecordingRunner) RestoreSnapshot(context.Context, string, string, []string) error {
 	r.calls = append(r.calls, "restore")
 	return nil
+}
+
+func TestRecordingRunnerImplementsUnlock(t *testing.T) {
+	var _ resticExecutor = (*recordingRunner)(nil)
+	r := &recordingRunner{}
+	if err := r.Unlock(context.Background()); err != nil {
+		t.Fatalf("Unlock() error = %v, want nil", err)
+	}
+	if len(r.calls) != 1 || r.calls[0] != "unlock" {
+		t.Fatalf("calls = %#v, want [unlock]", r.calls)
+	}
 }
 
 func assertRunnerCalls(t *testing.T, got, want []string) {

@@ -174,6 +174,11 @@ func (r PlainRunner) RunForget(_ context.Context, _ RetentionPolicy) error {
 	return nil
 }
 
+// Unlock is a no-op for plain backups (no restic repository, no locks).
+func (r PlainRunner) Unlock(_ context.Context) error {
+	return nil
+}
+
 // ListSnapshots returns a single synthetic snapshot representing the
 // current state of the plain backup.
 func (r PlainRunner) ListSnapshots(ctx context.Context) ([]SnapshotInfo, error) {

@@ -69,6 +69,7 @@ type ProgressCallback func(phase string, progress *BackupProgress)
 
 type resticExecutor interface {
 	InitRepo(ctx context.Context) error
+	Unlock(ctx context.Context) error
 	RunBackup(ctx context.Context, dirs []string, excludes []string) (string, error)
 	RunForget(ctx context.Context, retention RetentionPolicy) error
 	ListSnapshots(ctx context.Context) ([]SnapshotInfo, error)
