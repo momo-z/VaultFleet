@@ -38,6 +38,7 @@ type BackupRunnerWithProgressFunc func(context.Context, executor.ExecutorConfig,
 type RestoreRunnerFunc func(context.Context, executor.ExecutorConfig, string, string, []string) error
 type SnapshotListRunnerFunc func(context.Context, executor.ExecutorConfig) ([]executor.SnapshotInfo, error)
 type SnapshotBrowseRunnerFunc func(context.Context, executor.ExecutorConfig, string, string) ([]executor.SnapshotFileEntry, error)
+type MaintenanceRunnerFunc func(context.Context, executor.ExecutorConfig, executor.MaintenanceOp) executor.TaskResult
 
 type policyScheduler interface {
 	Validate(schedule string) error
@@ -58,6 +59,7 @@ type HandlerConfig struct {
 	RestoreRunner            RestoreRunnerFunc
 	SnapshotListRunner       SnapshotListRunnerFunc
 	SnapshotBrowseRunner     SnapshotBrowseRunnerFunc
+	MaintenanceRunner        MaintenanceRunnerFunc
 	DirSizeFunc              DirSizeFunc
 	AgentVersion             string
 	Updater                  AgentUpdater
@@ -76,6 +78,7 @@ type Handler struct {
 	restoreRunner            RestoreRunnerFunc
 	snapshotListRunner       SnapshotListRunnerFunc
 	snapshotBrowseRunner     SnapshotBrowseRunnerFunc
+	maintenanceRunner        MaintenanceRunnerFunc
 	snapshotCache            *snapshotCache
 	dirSizeFunc              DirSizeFunc
 	agentVersion             string
@@ -119,6 +122,10 @@ func NewHandler(config HandlerConfig) *Handler {
 	if snapshotBrowseRunner == nil {
 		snapshotBrowseRunner = runSnapshotBrowse
 	}
+	maintenanceRunner := config.MaintenanceRunner
+	if maintenanceRunner == nil {
+		maintenanceRunner = runMaintenance
+	}
 	dirSizeFunc := config.DirSizeFunc
 	if dirSizeFunc == nil {
 		dirSizeFunc = filebrowse.CalculateDirSize
@@ -144,6 +151,7 @@ func NewHandler(config HandlerConfig) *Handler {
 		restoreRunner:            restoreRunner,
 		snapshotListRunner:       snapshotListRunner,
 		snapshotBrowseRunner:     snapshotBrowseRunner,
+		maintenanceRunner:        maintenanceRunner,
 		snapshotCache:            newSnapshotCache(configDir),
 		dirSizeFunc:              dirSizeFunc,
 		agentVersion:             config.AgentVersion,
@@ -160,6 +168,8 @@ func (h *Handler) Handle(msg protocol.Message) {
 		h.handlePolicyPush(msg)
 	case protocol.TypeBackupNow:
 		h.handleBackupNow(msg)
+	case protocol.TypeMaintenance:
+		h.handleMaintenance(msg)
 	case protocol.TypeDirBrowseReq:
 		h.handleDirBrowseReq(msg)
 	case protocol.TypeDirSizeReq:
@@ -571,6 +581,63 @@ func (h *Handler) handleBackupNow(msg protocol.Message) {
 	}
 }
 
+func isValidMaintenanceOp(op string) bool {
+	switch executor.MaintenanceOp(op) {
+	case executor.OpUnlock, executor.OpCheck, executor.OpRepairIndex, executor.OpRepairSnapshots, executor.OpPrune:
+		return true
+	default:
+		return false
+	}
+}
+
+func (h *Handler) handleMaintenance(msg protocol.Message) {
+	payload, err := protocol.ParsePayload[protocol.MaintenancePayload](&msg)
+	if err != nil {
+		log.Printf("parse maintenance failed: %v", err)
+		h.sendTaskResultWithID(msg.ID, h.failedTypedTaskResult(h.agentID, "maintenance", "", "parse maintenance: "+err.Error(), time.Now()))
+		return
+	}
+
+	agentID := payload.AgentID
+	if agentID == "" {
+		agentID = h.agentID
+	}
+	if !isValidMaintenanceOp(payload.Operation) {
+		h.sendTaskResultWithID(msg.ID, h.failedTypedTaskResult(agentID, "maintenance", "", "invalid maintenance operation: "+payload.Operation, time.Now()))
+		return
+	}
+	if h.policyStore == nil {
+		h.sendTaskResultWithID(msg.ID, h.failedTypedTaskResult(agentID, "maintenance", "", "policy store not configured", time.Now()))
+		return
+	}
+
+	policyPayload, err := h.policyStore.LoadPolicy()
+	if err != nil {
+		log.Printf("load policy failed: %v", err)
+		h.sendTaskResultWithID(msg.ID, h.failedTypedTaskResult(agentID, "maintenance", "", "load policy: "+err.Error(), time.Now()))
+		return
+	}
+	if agentID == "" {
+		agentID = policyPayload.AgentID
+	}
+
+	op := executor.MaintenanceOp(payload.Operation)
+	startErr := h.tasks.Start(msg.ID, taskTypeBackup, func(ctx context.Context) {
+		startedAt := time.Now()
+		if err := h.ensureRcloneConf(policyPayload); err != nil {
+			log.Printf("prepare rclone config failed: %v", err)
+			h.sendTaskResultWithID(msg.ID, h.failedTypedTaskResult(agentID, "maintenance", "", "prepare rclone config: "+err.Error(), startedAt))
+			return
+		}
+		cfg := executorConfigForPolicy(h.configDir, policyPayload)
+		result := h.maintenanceRunner(ctx, cfg, op)
+		h.sendTaskResultWithID(msg.ID, result.ToProtocol(agentID, startedAt))
+	})
+	if startErr != nil {
+		h.sendTaskResultWithID(msg.ID, h.failedTypedTaskResult(agentID, "maintenance", "", startErr.Error(), time.Now()))
+	}
+}
+
 func (h *Handler) runBackupForPolicy(ctx context.Context, messageID string, agentID string, policyPayload *protocol.PolicyPushPayload) {
 	if policyPayload == nil {
 		return
@@ -871,6 +938,10 @@ func runBackup(ctx context.Context, cfg executor.ExecutorConfig) executor.TaskRe
 
 func runBackupWithProgress(ctx context.Context, cfg executor.ExecutorConfig, progressFn executor.ProgressCallback) executor.TaskResult {
 	return executor.NewExecutor(cfg).RunBackupJobWithProgress(ctx, progressFn)
+}
+
+func runMaintenance(ctx context.Context, cfg executor.ExecutorConfig, op executor.MaintenanceOp) executor.TaskResult {
+	return executor.NewExecutor(cfg).RunMaintenanceJob(ctx, op)
 }
 
 func runRestore(ctx context.Context, cfg executor.ExecutorConfig, snapshotID string, target string, includePaths []string) error {

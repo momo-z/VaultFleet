@@ -32,6 +32,7 @@ const (
 	TypeUpdateAgent         = "update_agent"
 	TypeBackupProgress      = "backup_progress"
 	TypeCancelTask          = "cancel_task"
+	TypeMaintenance         = "maintenance"
 )
 
 const (
@@ -213,6 +214,12 @@ type RetentionPolicy struct {
 // BackupNowPayload requests an immediate backup run for an agent.
 type BackupNowPayload struct {
 	AgentID string `json:"agent_id"`
+}
+
+// MaintenancePayload requests a repository maintenance operation on an agent.
+type MaintenancePayload struct {
+	AgentID   string `json:"agent_id"`
+	Operation string `json:"operation"`
 }
 
 // RestoreReqPayload requests a snapshot restore to a target path.

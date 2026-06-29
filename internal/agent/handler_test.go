@@ -796,6 +796,39 @@ func TestHandleBackupNowPreservesLegacyObscuredSFTPPassword(t *testing.T) {
 	assert.Equal(t, "clear-sftp-password", revealed)
 }
 
+func TestHandleMaintenanceRunsAndReportsResult(t *testing.T) {
+	store := policy.NewStore(t.TempDir())
+	configDir := t.TempDir()
+	require.NoError(t, store.SavePolicy(&protocol.PolicyPushPayload{
+		AgentID:    "agent-1",
+		Storage:    protocol.StorageConfig{RepoPath: "repo/agent-1"},
+		BackupDirs: []string{"/srv"},
+	}))
+	sent := &sentMessages{}
+	var gotOp executor.MaintenanceOp
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: store,
+		ConfigDir:   configDir,
+		SendFunc:    sent.send,
+		MaintenanceRunner: func(_ context.Context, _ executor.ExecutorConfig, op executor.MaintenanceOp) executor.TaskResult {
+			gotOp = op
+			return executor.TaskResult{Type: "maintenance", Status: "success", Output: "no errors were found", DurationMs: 5}
+		},
+	})
+	msg, err := protocol.NewMessage(protocol.TypeMaintenance, protocol.MaintenancePayload{AgentID: "agent-1", Operation: "check"})
+	require.NoError(t, err)
+
+	handler.Handle(*msg)
+
+	resultMsg := waitForMessageTypeCount(t, sent, protocol.TypeTaskResult, 1, time.Second)
+	assert.Equal(t, msg.ID, resultMsg.ID)
+	result, err := protocol.ParsePayload[protocol.TaskResultPayload](&resultMsg)
+	require.NoError(t, err)
+	assert.Equal(t, "maintenance", result.TaskType)
+	assert.Equal(t, "success", result.Status)
+	assert.Equal(t, executor.MaintenanceOp("check"), gotOp)
+}
+
 func TestHandleBackupNowUsesLegacyBackupRunnerWhenProgressRunnerUnset(t *testing.T) {
 	store := policy.NewStore(t.TempDir())
 	configDir := t.TempDir()
