@@ -159,6 +159,11 @@ func (e *Executor) RunBackupJob(ctx context.Context) (result TaskResult) {
 		result.ErrorLog = "init: " + err.Error()
 		return result
 	}
+	// Preflight: clear stale locks before backup. Non-fatal — if the repo is
+	// genuinely locked by an active process, the backup below will report it.
+	if err := e.restic.Unlock(ctx); err != nil {
+		log.Printf("pre-backup unlock failed (continuing): %v", err)
+	}
 	if _, err := e.restic.RunBackup(ctx, e.backupDirs, e.excludes); err != nil {
 		result.ErrorLog = "backup: " + err.Error()
 		return result
@@ -210,6 +215,10 @@ func (e *Executor) RunBackupJobWithProgress(ctx context.Context, progressFn Prog
 	if err := e.restic.InitRepo(ctx); err != nil {
 		result.ErrorLog = "init: " + err.Error()
 		return result
+	}
+	// Preflight: clear stale locks before backup (non-fatal).
+	if err := e.restic.Unlock(ctx); err != nil {
+		log.Printf("pre-backup unlock failed (continuing): %v", err)
 	}
 
 	emitProgress(progressFn, "backup", nil)

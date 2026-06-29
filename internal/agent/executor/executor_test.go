@@ -168,7 +168,7 @@ func TestRunBackupJobSuccessReturnsLatestSnapshotAndSnapshots(t *testing.T) {
 	if result.DurationMs <= 0 {
 		t.Fatalf("DurationMs = %d, want positive duration", result.DurationMs)
 	}
-	assertRunnerCalls(t, runner.calls, []string{"init", "backup", "forget", "snapshots", "stats"})
+	assertRunnerCalls(t, runner.calls, []string{"init", "unlock", "backup", "forget", "snapshots", "stats"})
 }
 
 func TestRunBackupJobFailsWhenRepositorySizeCannotBeRead(t *testing.T) {
@@ -190,7 +190,7 @@ func TestRunBackupJobFailsWhenRepositorySizeCannotBeRead(t *testing.T) {
 	if !strings.Contains(result.ErrorLog, "stats: repository locked") {
 		t.Fatalf("ErrorLog = %q, want stats stage and error", result.ErrorLog)
 	}
-	assertRunnerCalls(t, runner.calls, []string{"init", "backup", "forget", "snapshots", "stats"})
+	assertRunnerCalls(t, runner.calls, []string{"init", "unlock", "backup", "forget", "snapshots", "stats"})
 }
 
 func TestRunBackupJobFailureStopsAtStageAndReturnsErrorLog(t *testing.T) {
@@ -209,7 +209,7 @@ func TestRunBackupJobFailureStopsAtStageAndReturnsErrorLog(t *testing.T) {
 	if !strings.Contains(result.ErrorLog, "backup: disk read failed") {
 		t.Fatalf("ErrorLog = %q, want backup stage and error", result.ErrorLog)
 	}
-	assertRunnerCalls(t, runner.calls, []string{"init", "backup"})
+	assertRunnerCalls(t, runner.calls, []string{"init", "unlock", "backup"})
 }
 
 func TestRunBackupJobWithProgressReportsPhasesAndUsesProgressRunner(t *testing.T) {
@@ -239,7 +239,7 @@ func TestRunBackupJobWithProgressReportsPhasesAndUsesProgressRunner(t *testing.T
 	if result.Status != "success" {
 		t.Fatalf("Status = %q, want success; error log: %q", result.Status, result.ErrorLog)
 	}
-	assertRunnerCalls(t, runner.calls, []string{"init", "backup_with_progress", "forget", "snapshots", "stats"})
+	assertRunnerCalls(t, runner.calls, []string{"init", "unlock", "backup_with_progress", "forget", "snapshots", "stats"})
 	wantPhases := []string{"init", "backup", "backup", "backup", "forget", "stats"}
 	if strings.Join(phases, ",") != strings.Join(wantPhases, ",") {
 		t.Fatalf("progress phases = %#v, want %#v", phases, wantPhases)
@@ -275,7 +275,7 @@ func TestRunBackupJobWithProgressFallsBackToPlainBackupRunner(t *testing.T) {
 	if result.SnapshotID != "snap-plain" {
 		t.Fatalf("SnapshotID = %q, want snap-plain", result.SnapshotID)
 	}
-	assertRunnerCalls(t, runner.calls, []string{"init", "backup", "forget", "snapshots", "stats"})
+	assertRunnerCalls(t, runner.calls, []string{"init", "unlock", "backup", "forget", "snapshots", "stats"})
 }
 
 func TestTaskResultJSONUsesSnakeCaseProtocolKeys(t *testing.T) {
@@ -587,4 +587,35 @@ func assertProtocolResult(t *testing.T, got, want protocol.TaskResultPayload) {
 	if !got.FinishedAt.Equal(want.FinishedAt) {
 		t.Fatalf("FinishedAt = %s, want %s", got.FinishedAt, want.FinishedAt)
 	}
+}
+
+func TestRunBackupJobCallsUnlockBeforeBackup(t *testing.T) {
+	runner := &recordingRunner{
+		snapshots: []SnapshotInfo{{ID: "s1", Time: time.Now()}},
+		repoSize:  100,
+	}
+	executor := &Executor{restic: runner}
+
+	result := executor.RunBackupJob(context.Background())
+
+	if result.Status != "success" {
+		t.Fatalf("status = %q, want success (err=%q)", result.Status, result.ErrorLog)
+	}
+	assertRunnerCalls(t, runner.calls, []string{"init", "unlock", "backup", "forget", "snapshots", "stats"})
+}
+
+func TestRunBackupJobContinuesWhenUnlockFails(t *testing.T) {
+	runner := &recordingRunner{
+		unlockErr: errors.New("unlock boom"),
+		snapshots: []SnapshotInfo{{ID: "s1", Time: time.Now()}},
+		repoSize:  100,
+	}
+	executor := &Executor{restic: runner}
+
+	result := executor.RunBackupJob(context.Background())
+
+	if result.Status != "success" {
+		t.Fatalf("status = %q, want success despite unlock failure (err=%q)", result.Status, result.ErrorLog)
+	}
+	assertRunnerCalls(t, runner.calls, []string{"init", "unlock", "backup", "forget", "snapshots", "stats"})
 }
