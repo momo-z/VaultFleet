@@ -1134,3 +1134,64 @@ func TestCommandSendsSigtermOnContextCancel(t *testing.T) {
 		t.Fatalf("fake restic did not receive SIGTERM (marker missing): %v", err)
 	}
 }
+
+func TestBuildUnlockCmdUsesBaseArgsWithoutRemoveAll(t *testing.T) {
+	pwFile := writeTempPasswordFile(t, "secret")
+	runner := ResticRunner{
+		RcloneConfPath: "/tmp/rclone.conf",
+		PasswordFile:   pwFile,
+		RepoPath:       "repo",
+	}
+
+	cmd := runner.buildUnlockCmdContext(context.Background())
+
+	assertArgsEqual(t, cmd.Args, []string{
+		"restic",
+		"unlock",
+		"-r",
+		"rclone:vaultfleet:repo",
+		"--password-file",
+		pwFile,
+		"-o",
+		"rclone.args=serve restic --stdio --config /tmp/rclone.conf",
+	})
+	for _, a := range cmd.Args {
+		if a == "--remove-all" {
+			t.Fatal("unlock must not include --remove-all")
+		}
+	}
+}
+
+func TestUnlockRunsResticUnlockSuccessfully(t *testing.T) {
+	dir := t.TempDir()
+	writeFakeResticRouter(t, dir, map[string]fakeResticScript{
+		"unlock": {Stdout: "successfully removed 1 locks\n"},
+	})
+	prependPath(t, dir)
+
+	pwFile := writeTempPasswordFile(t, "secret")
+	runner := ResticRunner{RcloneConfPath: "/tmp/rclone.conf", PasswordFile: pwFile, RepoPath: "repo"}
+
+	if err := runner.Unlock(context.Background()); err != nil {
+		t.Fatalf("Unlock() error = %v, want nil", err)
+	}
+}
+
+func TestUnlockReturnsErrorOnResticFailure(t *testing.T) {
+	dir := t.TempDir()
+	writeFakeResticRouter(t, dir, map[string]fakeResticScript{
+		"unlock": {Stderr: "unlock failed\n", Exit: 1},
+	})
+	prependPath(t, dir)
+
+	pwFile := writeTempPasswordFile(t, "secret")
+	runner := ResticRunner{RcloneConfPath: "/tmp/rclone.conf", PasswordFile: pwFile, RepoPath: "repo"}
+
+	err := runner.Unlock(context.Background())
+	if err == nil {
+		t.Fatal("Unlock() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "run restic unlock") {
+		t.Fatalf("Unlock() error = %q, want it to mention 'run restic unlock'", err.Error())
+	}
+}

@@ -205,6 +205,11 @@ func (r ResticRunner) buildInitCmdContext(ctx context.Context) *exec.Cmd {
 	return r.command(ctx, args...)
 }
 
+func (r ResticRunner) buildUnlockCmdContext(ctx context.Context) *exec.Cmd {
+	args := append([]string{"unlock"}, r.baseArgs()...)
+	return r.command(ctx, args...)
+}
+
 func (r ResticRunner) buildBackupCmdContext(ctx context.Context, dirs []string, excludes []string) *exec.Cmd {
 	args := append([]string{"backup"}, r.baseArgs()...)
 	for _, exclude := range excludes {
@@ -486,6 +491,19 @@ func resticBackupErrorDetails(stderr string, backupErrors []string) string {
 		details += "\n"
 	}
 	return details + strings.Join(backupErrors, "\n")
+}
+
+// Unlock removes stale repository locks (locks whose creating process no
+// longer exists or has timed out). It does not pass --remove-all, so active
+// locks are left untouched. Used as a pre-backup preflight.
+func (r ResticRunner) Unlock(ctx context.Context) error {
+	cmd := r.buildUnlockCmdContext(ctx)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return commandError("run restic unlock", stderr.String(), err)
+	}
+	return nil
 }
 
 func (r ResticRunner) RunForget(ctx context.Context, retention RetentionPolicy) error {
