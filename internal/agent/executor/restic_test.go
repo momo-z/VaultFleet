@@ -1221,3 +1221,29 @@ func TestBuildMaintenanceCmds(t *testing.T) {
 		})
 	}
 }
+
+func TestRunMaintenanceCheckReturnsOutput(t *testing.T) {
+	dir := t.TempDir()
+	writeFakeResticRouter(t, dir, map[string]fakeResticScript{
+		"check": {Stdout: "no errors were found\n"},
+	})
+	prependPath(t, dir)
+	pwFile := writeTempPasswordFile(t, "secret")
+	runner := ResticRunner{RcloneConfPath: "/tmp/rclone.conf", PasswordFile: pwFile, RepoPath: "repo"}
+
+	out, err := runner.RunMaintenance(context.Background(), OpCheck)
+	if err != nil {
+		t.Fatalf("RunMaintenance(check) err = %v", err)
+	}
+	if !strings.Contains(out, "no errors were found") {
+		t.Fatalf("output = %q, want check result text", out)
+	}
+}
+
+func TestRunMaintenanceUnknownOpErrors(t *testing.T) {
+	pwFile := writeTempPasswordFile(t, "secret")
+	runner := ResticRunner{RcloneConfPath: "/tmp/rclone.conf", PasswordFile: pwFile, RepoPath: "repo"}
+	if _, err := runner.RunMaintenance(context.Background(), MaintenanceOp("bogus")); err == nil {
+		t.Fatal("RunMaintenance(bogus) err = nil, want error")
+	}
+}

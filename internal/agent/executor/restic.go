@@ -16,6 +16,16 @@ import (
 	"time"
 )
 
+type MaintenanceOp string
+
+const (
+	OpUnlock          MaintenanceOp = "unlock"
+	OpCheck           MaintenanceOp = "check"
+	OpRepairIndex     MaintenanceOp = "repair_index"
+	OpRepairSnapshots MaintenanceOp = "repair_snapshots"
+	OpPrune           MaintenanceOp = "prune"
+)
+
 type RetentionPolicy struct {
 	KeepLast    int `json:"keep_last"`
 	KeepDaily   int `json:"keep_daily"`
@@ -524,6 +534,34 @@ func (r ResticRunner) Unlock(ctx context.Context) error {
 		return commandError("run restic unlock", stderr.String(), err)
 	}
 	return nil
+}
+
+// RunMaintenance executes a repository maintenance operation and returns its
+// combined output. unlock delegates to Unlock. Other ops run their builder.
+func (r ResticRunner) RunMaintenance(ctx context.Context, op MaintenanceOp) (string, error) {
+	if op == OpUnlock {
+		return "", r.Unlock(ctx)
+	}
+	var cmd *exec.Cmd
+	switch op {
+	case OpCheck:
+		cmd = r.buildCheckCmdContext(ctx)
+	case OpRepairIndex:
+		cmd = r.buildRepairIndexCmdContext(ctx)
+	case OpRepairSnapshots:
+		cmd = r.buildRepairSnapshotsCmdContext(ctx)
+	case OpPrune:
+		cmd = r.buildPruneCmdContext(ctx)
+	default:
+		return "", fmt.Errorf("unknown maintenance op: %q", op)
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return stdout.String(), commandError("run restic "+string(op), stderr.String(), err)
+	}
+	return stdout.String() + stderr.String(), nil
 }
 
 func (r ResticRunner) RunForget(ctx context.Context, retention RetentionPolicy) error {
