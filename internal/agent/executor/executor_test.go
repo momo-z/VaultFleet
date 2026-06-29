@@ -472,8 +472,13 @@ func (r *recordingRunner) RunBackupWithProgress(_ context.Context, dirs []string
 	return r.backupOut, r.backupErr
 }
 
-func (r *recordingRunner) RunForget(_ context.Context, retention RetentionPolicy) error {
-	r.calls = append(r.calls, "forget")
+func (r *recordingRunner) RunForget(ctx context.Context, retention RetentionPolicy) error {
+	select {
+	case <-ctx.Done():
+		r.calls = append(r.calls, "forget_cancelled")
+	default:
+		r.calls = append(r.calls, "forget")
+	}
 	return r.forgetErr
 }
 
@@ -618,4 +623,32 @@ func TestRunBackupJobContinuesWhenUnlockFails(t *testing.T) {
 		t.Fatalf("status = %q, want success despite unlock failure (err=%q)", result.Status, result.ErrorLog)
 	}
 	assertRunnerCalls(t, runner.calls, []string{"init", "unlock", "backup", "forget", "snapshots", "stats"})
+}
+
+func TestForgetUsesIndependentContextNotCancelledByTaskCtx(t *testing.T) {
+	runner := &recordingRunner{
+		snapshots: []SnapshotInfo{{ID: "s1", Time: time.Now()}},
+		repoSize:  100,
+	}
+	executor := &Executor{restic: runner}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 任务 ctx 立即取消
+
+	_ = executor.RunBackupJob(ctx)
+
+	for _, c := range runner.calls {
+		if c == "forget_cancelled" {
+			t.Fatal("forget received a cancelled context; it must use an independent ctx")
+		}
+	}
+	foundForget := false
+	for _, c := range runner.calls {
+		if c == "forget" {
+			foundForget = true
+		}
+	}
+	if !foundForget {
+		t.Fatalf("forget was not called; calls = %#v", runner.calls)
+	}
 }

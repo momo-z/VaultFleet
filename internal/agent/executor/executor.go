@@ -11,6 +11,12 @@ import (
 	"vaultfleet/pkg/protocol"
 )
 
+// pruneHardTimeout caps how long forget --prune may run. The prune phase uses
+// an independent context (not tied to task cancellation) so it is never killed
+// mid-operation, which would corrupt the repository. This timeout only guards
+// against an indefinitely hung prune.
+const pruneHardTimeout = 2 * time.Hour
+
 type TaskResult struct {
 	Type       string         `json:"type"`
 	Status     string         `json:"status"`
@@ -168,7 +174,10 @@ func (e *Executor) RunBackupJob(ctx context.Context) (result TaskResult) {
 		result.ErrorLog = "backup: " + err.Error()
 		return result
 	}
-	if err := e.restic.RunForget(ctx, e.retention); err != nil {
+	forgetCtx, cancelForget := context.WithTimeout(context.Background(), pruneHardTimeout)
+	err := e.restic.RunForget(forgetCtx, e.retention)
+	cancelForget()
+	if err != nil {
 		result.ErrorLog = "forget: " + err.Error()
 		return result
 	}
@@ -240,8 +249,11 @@ func (e *Executor) RunBackupJobWithProgress(ctx context.Context, progressFn Prog
 	}
 
 	emitProgress(progressFn, "forget", nil)
-	if err := e.restic.RunForget(ctx, e.retention); err != nil {
-		result.ErrorLog = "forget: " + err.Error()
+	forgetCtx, cancelForget := context.WithTimeout(context.Background(), pruneHardTimeout)
+	forgetErr := e.restic.RunForget(forgetCtx, e.retention)
+	cancelForget()
+	if forgetErr != nil {
+		result.ErrorLog = "forget: " + forgetErr.Error()
 		return result
 	}
 
