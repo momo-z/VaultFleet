@@ -21,6 +21,7 @@ import (
 const (
 	maxSnapshotBrowseResponseBytes = 900 * 1024
 	backupProgressThrottleInterval = 5 * time.Second
+	periodicCheckSchedule          = "0 5 * * *"
 )
 
 type SendFunc func(protocol.Message) error
@@ -204,6 +205,7 @@ func (h *Handler) restoreSavedPolicySchedule() {
 	}
 	if savedPolicy.Schedule == "" {
 		h.scheduler.RemoveJob(savedPolicy.AgentID)
+		h.scheduler.RemoveJob(checkJobKey(savedPolicy.AgentID))
 		return
 	}
 	if err := h.scheduler.UpdateSchedule(savedPolicy.AgentID, savedPolicy.Schedule, func() {
@@ -216,6 +218,45 @@ func (h *Handler) restoreSavedPolicySchedule() {
 	}); err != nil {
 		log.Printf("restore saved policy schedule failed: %v", err)
 	}
+	h.updatePeriodicCheckSchedule(savedPolicy.AgentID, savedPolicy)
+}
+
+func checkJobKey(agentID string) string {
+	return agentID + ":check"
+}
+
+func (h *Handler) updatePeriodicCheckSchedule(agentID string, policyPayload *protocol.PolicyPushPayload) {
+	if h.scheduler == nil {
+		return
+	}
+	if err := h.scheduler.UpdateSchedule(checkJobKey(agentID), periodicCheckSchedule, func() {
+		startErr := h.tasks.Start("", taskTypeBackup, func(ctx context.Context) {
+			h.runCheckForPolicy(ctx, agentID, policyPayload)
+		})
+		if startErr != nil {
+			log.Printf("scheduled check skipped: %v", startErr)
+		}
+	}); err != nil {
+		log.Printf("update periodic check schedule failed: %v", err)
+	}
+}
+
+func (h *Handler) runCheckForPolicy(ctx context.Context, agentID string, policyPayload *protocol.PolicyPushPayload) {
+	if policyPayload == nil {
+		return
+	}
+	if agentID == "" {
+		agentID = policyPayload.AgentID
+	}
+	startedAt := time.Now()
+	if err := h.ensureRcloneConf(policyPayload); err != nil {
+		log.Printf("prepare rclone config failed: %v", err)
+		h.sendTaskResult(h.failedTypedTaskResult(agentID, "maintenance", "", "prepare rclone config: "+err.Error(), startedAt))
+		return
+	}
+	cfg := executorConfigForPolicy(h.configDir, policyPayload)
+	result := h.maintenanceRunner(ctx, cfg, executor.OpCheck)
+	h.sendTaskResult(result.ToProtocol(agentID, startedAt))
 }
 
 func (h *Handler) handlePolicyPush(msg protocol.Message) {
@@ -285,6 +326,7 @@ func (h *Handler) handlePolicyPush(msg protocol.Message) {
 			h.sendPolicyAck(msg.ID, pushedPolicy.AgentID, false, err.Error())
 			return
 		}
+		h.updatePeriodicCheckSchedule(pushedPolicy.AgentID, pushedPolicy)
 	}
 	h.sendPolicyAck(msg.ID, pushedPolicy.AgentID, true, "")
 }

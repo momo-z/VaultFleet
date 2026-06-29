@@ -184,6 +184,53 @@ func TestDispatcherSendsDirectBackupFailedEventOnlyToMatchingConfigs(t *testing.
 	assert.False(t, msg.Timestamp.IsZero())
 }
 
+func TestMaintenanceCheckFailedProducesCorruptionAlert(t *testing.T) {
+	dispatcher := NewDispatcher(nil, nil)
+
+	t.Run("failed status", func(t *testing.T) {
+		msg, _, ok := dispatcher.notificationForEvent(events.Event{
+			Type: events.TaskResult,
+			Payload: protocol.TaskResultPayload{
+				AgentID:  "agent-1",
+				TaskType: "maintenance",
+				Status:   "failed",
+				Output:   "repository contains errors",
+			},
+		})
+		require.True(t, ok)
+		assert.Contains(t, msg.Title, "Corruption")
+		assert.Equal(t, LevelError, msg.Level)
+		assert.Contains(t, msg.Body, "repository contains errors")
+	})
+
+	t.Run("corruption marker in output", func(t *testing.T) {
+		msg, _, ok := dispatcher.notificationForEvent(events.Event{
+			Type: events.TaskResult,
+			Payload: protocol.TaskResultPayload{
+				AgentID:  "agent-1",
+				TaskType: "maintenance",
+				Status:   "success",
+				Output:   "pack 1234 is not known\nrepository is damaged",
+			},
+		})
+		require.True(t, ok)
+		assert.Contains(t, msg.Title, "Corruption")
+	})
+
+	t.Run("successful check produces no alert", func(t *testing.T) {
+		_, _, ok := dispatcher.notificationForEvent(events.Event{
+			Type: events.TaskResult,
+			Payload: protocol.TaskResultPayload{
+				AgentID:  "agent-1",
+				TaskType: "maintenance",
+				Status:   "success",
+				Output:   "no errors were found",
+			},
+		})
+		assert.False(t, ok)
+	})
+}
+
 func TestDispatcherIgnoresSuccessfulOrNonBackupTaskResults(t *testing.T) {
 	database := setupNotifyTestDB(t)
 	bus := events.NewBus()

@@ -79,10 +79,11 @@ func TestHandlePolicyPushSavesPolicyWritesConfigSchedulesBackupAndAcks(t *testin
 	assert.Equal(t, "secret-password", string(password))
 	assertFileMode(t, filepath.Join(configDir, ".restic-password"), 0o600)
 
-	require.Len(t, scheduler.updates, 1)
+	require.Len(t, scheduler.updates, 2)
 	assert.Equal(t, "agent-1", scheduler.updates[0].agentID)
 	assert.Equal(t, "0 4 * * *", scheduler.updates[0].schedule)
 	require.NotNil(t, scheduler.updates[0].fn)
+	assert.Equal(t, "agent-1:check", scheduler.updates[1].agentID)
 
 	messages := sent.snapshot()
 	require.Len(t, messages, 1)
@@ -209,13 +210,59 @@ func TestNewHandlerRestoresSavedPolicySchedule(t *testing.T) {
 		},
 	})
 
-	require.Len(t, scheduler.updates, 1)
+	require.Len(t, scheduler.updates, 2)
 	assert.Equal(t, "agent-1", scheduler.updates[0].agentID)
 	assert.Equal(t, "0 2 * * *", scheduler.updates[0].schedule)
+	assert.Equal(t, "agent-1:check", scheduler.updates[1].agentID)
 
 	scheduler.updates[0].fn()
 	waitForMessageType(t, sent, protocol.TypeTaskResult, time.Second)
 	assert.Equal(t, int32(1), runnerCalls.Load())
+}
+
+func TestNewHandlerRegistersPeriodicCheckJob(t *testing.T) {
+	store := policy.NewStore(t.TempDir())
+	require.NoError(t, store.SavePolicy(&protocol.PolicyPushPayload{
+		AgentID: "agent-1",
+		Storage: protocol.StorageConfig{
+			RepoPath: "bucket/agent-1",
+		},
+		BackupDirs: []string{"/srv"},
+		Schedule:   "0 2 * * *",
+	}))
+
+	scheduler := &recordingScheduler{}
+	sent := &sentMessages{}
+	var gotOp executor.MaintenanceOp
+	var maintCalls atomic.Int32
+	NewHandler(HandlerConfig{
+		PolicyStore: store,
+		ConfigDir:   t.TempDir(),
+		Scheduler:   scheduler,
+		SendFunc:    sent.send,
+		BackupRunnerWithProgress: func(_ context.Context, _ executor.ExecutorConfig, _ executor.ProgressCallback) executor.TaskResult {
+			return executor.TaskResult{Type: "backup", Status: "success"}
+		},
+		MaintenanceRunner: func(_ context.Context, _ executor.ExecutorConfig, op executor.MaintenanceOp) executor.TaskResult {
+			maintCalls.Add(1)
+			gotOp = op
+			return executor.TaskResult{Type: "maintenance", Status: "success", Output: "no errors were found"}
+		},
+	})
+
+	var checkUpdate *scheduledUpdate
+	for i := range scheduler.updates {
+		if scheduler.updates[i].agentID == "agent-1:check" {
+			checkUpdate = &scheduler.updates[i]
+		}
+	}
+	require.NotNil(t, checkUpdate, "expected a check job registered under key agent-1:check")
+	require.NotNil(t, checkUpdate.fn)
+
+	checkUpdate.fn()
+	waitForMessageType(t, sent, protocol.TypeTaskResult, time.Second)
+	assert.Equal(t, int32(1), maintCalls.Load())
+	assert.Equal(t, executor.OpCheck, gotOp)
 }
 
 func TestHandlePolicyPushPassesRcloneArgs(t *testing.T) {
@@ -256,7 +303,7 @@ func TestHandlePolicyPushPassesRcloneArgs(t *testing.T) {
 
 	handler.Handle(*msg)
 
-	require.Len(t, scheduler.updates, 1)
+	require.Len(t, scheduler.updates, 2)
 	require.NotNil(t, scheduler.updates[0].fn)
 
 	scheduler.updates[0].fn()
@@ -615,7 +662,9 @@ func TestHandlePolicyPushReplaceFailurePreservesExistingPolicyAndConfig(t *testi
 	require.NoError(t, err)
 	assert.False(t, ack.Success)
 	assert.NotEmpty(t, ack.Error)
-	assert.Len(t, scheduler.updates, 1)
+	assert.Len(t, scheduler.updates, 2)
+	assert.Equal(t, "agent-1", scheduler.updates[0].agentID)
+	assert.Equal(t, "agent-1:check", scheduler.updates[1].agentID)
 
 	stored, err := store.LoadPolicy()
 	require.NoError(t, err)
