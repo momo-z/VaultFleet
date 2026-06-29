@@ -118,6 +118,7 @@ type TaskResultPayload struct {
 	DurationMs int64          `json:"duration_ms"`
 	RepoSize   int64          `json:"repo_size"`
 	ErrorLog   string         `json:"error_log,omitempty"`
+	Output     string         `json:"output,omitempty"`
 	StartedAt  time.Time      `json:"started_at"`
 	FinishedAt time.Time      `json:"finished_at"`
 	Snapshots  []SnapshotInfo `json:"snapshots,omitempty"`

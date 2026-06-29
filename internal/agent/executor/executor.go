@@ -47,6 +47,7 @@ func (r TaskResult) ToProtocol(agentID string, startedAt time.Time) protocol.Tas
 		DurationMs: r.DurationMs,
 		RepoSize:   r.RepoSize,
 		ErrorLog:   r.ErrorLog,
+		Output:     r.Output,
 		StartedAt:  startedAt,
 		FinishedAt: startedAt.Add(time.Duration(r.DurationMs) * time.Millisecond),
 		Snapshots:  snapshots,

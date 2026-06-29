@@ -71,6 +71,8 @@ func DeadlineForType(commandType string, now time.Time) time.Time {
 		return now.Add(2 * time.Minute)
 	case protocol.TypeBackupNow, protocol.TypeRestoreReq, protocol.TypeSelectiveRestoreReq:
 		return now.Add(6 * time.Hour)
+	case protocol.TypeMaintenance:
+		return now.Add(2 * time.Hour)
 	default:
 		return now.Add(30 * time.Minute)
 	}
@@ -327,6 +329,7 @@ func (s *Service) CompleteTaskResultWith(ctx context.Context, agentID string, me
 			"duration_ms": result.DurationMs,
 			"repo_size":   result.RepoSize,
 			"error_log":   result.ErrorLog,
+			"output":      result.Output,
 			"finished_at": finishedAt,
 			"updated_at":  now,
 		}

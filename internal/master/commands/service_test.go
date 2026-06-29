@@ -14,6 +14,11 @@ import (
 	"vaultfleet/pkg/protocol"
 )
 
+func TestDeadlineForTypeMaintenance(t *testing.T) {
+	now := time.Date(2026, 6, 29, 10, 0, 0, 0, time.UTC)
+	assert.Equal(t, now.Add(2*time.Hour), DeadlineForType(protocol.TypeMaintenance, now))
+}
+
 func TestCreateCommandEncryptsPayloadAndSetsDeadline(t *testing.T) {
 	database := setupCommandTestDB(t)
 	now := time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
