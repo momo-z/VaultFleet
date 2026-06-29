@@ -426,6 +426,8 @@ type recordingRunner struct {
 	statsErr    error
 	restoreErr  error
 	unlockErr   error
+	maintErr    error
+	maintOut    string
 }
 
 func (r *recordingRunner) InitRepo(context.Context) error {
@@ -497,6 +499,16 @@ func (r *recordingRunner) RestoreSnapshot(context.Context, string, string, []str
 	return r.restoreErr
 }
 
+func (r *recordingRunner) RunMaintenance(ctx context.Context, op MaintenanceOp) (string, error) {
+	select {
+	case <-ctx.Done():
+		r.calls = append(r.calls, "maint:"+string(op)+":cancelled")
+	default:
+		r.calls = append(r.calls, "maint:"+string(op))
+	}
+	return r.maintOut, r.maintErr
+}
+
 type plainRecordingRunner struct {
 	calls     []string
 	backupErr error
@@ -538,6 +550,37 @@ func (r *plainRecordingRunner) RepositorySize(context.Context) (int64, error) {
 func (r *plainRecordingRunner) RestoreSnapshot(context.Context, string, string, []string) error {
 	r.calls = append(r.calls, "restore")
 	return nil
+}
+
+func (r *plainRecordingRunner) RunMaintenance(context.Context, MaintenanceOp) (string, error) {
+	return "", nil
+}
+
+func TestRunMaintenanceJobPruneUsesIndependentCtx(t *testing.T) {
+	runner := &recordingRunner{maintOut: "pruned"}
+	executor := &Executor{restic: runner}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result := executor.RunMaintenanceJob(ctx, OpPrune)
+
+	if result.Status != "success" {
+		t.Fatalf("status = %q, want success (err=%q)", result.Status, result.ErrorLog)
+	}
+	for _, c := range runner.calls {
+		if c == "maint:prune:cancelled" {
+			t.Fatal("prune received cancelled ctx; must use independent ctx")
+		}
+	}
+}
+
+func TestRunMaintenanceJobCheckReturnsOutput(t *testing.T) {
+	runner := &recordingRunner{maintOut: "no errors were found"}
+	executor := &Executor{restic: runner}
+	result := executor.RunMaintenanceJob(context.Background(), OpCheck)
+	if result.Status != "success" || result.Output != "no errors were found" {
+		t.Fatalf("result = %+v", result)
+	}
 }
 
 func TestRecordingRunnerImplementsUnlock(t *testing.T) {

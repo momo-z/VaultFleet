@@ -25,6 +25,7 @@ type TaskResult struct {
 	RepoSize   int64          `json:"repo_size,omitempty"`
 	Snapshots  []SnapshotInfo `json:"snapshots,omitempty"`
 	ErrorLog   string         `json:"error_log,omitempty"`
+	Output     string         `json:"output,omitempty"`
 }
 
 func (r TaskResult) ToProtocol(agentID string, startedAt time.Time) protocol.TaskResultPayload {
@@ -81,6 +82,7 @@ type resticExecutor interface {
 	ListSnapshots(ctx context.Context) ([]SnapshotInfo, error)
 	RepositorySize(ctx context.Context) (int64, error)
 	RestoreSnapshot(ctx context.Context, snapshotID, targetPath string, includePaths []string) error
+	RunMaintenance(ctx context.Context, op MaintenanceOp) (string, error)
 }
 
 type resticExecutorWithProgress interface {
@@ -290,4 +292,32 @@ func emitProgress(progressFn ProgressCallback, phase string, progress *BackupPro
 	if progressFn != nil {
 		progressFn(phase, progress)
 	}
+}
+
+func isDestructiveOp(op MaintenanceOp) bool {
+	return op == OpRepairSnapshots || op == OpPrune
+}
+
+func (e *Executor) RunMaintenanceJob(ctx context.Context, op MaintenanceOp) (result TaskResult) {
+	start := time.Now()
+	result = TaskResult{Type: "maintenance", Status: "failed"}
+	defer func() { result.DurationMs = time.Since(start).Milliseconds() }()
+
+	runCtx := ctx
+	if isDestructiveOp(op) {
+		// Destructive ops (repair snapshots / prune) must not be killed mid-run.
+		var cancel context.CancelFunc
+		runCtx, cancel = context.WithTimeout(context.Background(), pruneHardTimeout)
+		defer cancel()
+	}
+
+	out, err := e.restic.RunMaintenance(runCtx, op)
+	if err != nil {
+		result.ErrorLog = string(op) + ": " + err.Error()
+		result.Output = out
+		return result
+	}
+	result.Status = "success"
+	result.Output = out
+	return result
 }
