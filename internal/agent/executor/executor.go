@@ -2,11 +2,20 @@ package executor
 
 import (
 	"context"
+	"log"
+	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"vaultfleet/pkg/protocol"
 )
+
+// pruneHardTimeout caps how long forget --prune may run. The prune phase uses
+// an independent context (not tied to task cancellation) so it is never killed
+// mid-operation, which would corrupt the repository. This timeout only guards
+// against an indefinitely hung prune.
+const pruneHardTimeout = 2 * time.Hour
 
 type TaskResult struct {
 	Type       string         `json:"type"`
@@ -16,6 +25,7 @@ type TaskResult struct {
 	RepoSize   int64          `json:"repo_size,omitempty"`
 	Snapshots  []SnapshotInfo `json:"snapshots,omitempty"`
 	ErrorLog   string         `json:"error_log,omitempty"`
+	Output     string         `json:"output,omitempty"`
 }
 
 func (r TaskResult) ToProtocol(agentID string, startedAt time.Time) protocol.TaskResultPayload {
@@ -37,6 +47,7 @@ func (r TaskResult) ToProtocol(agentID string, startedAt time.Time) protocol.Tas
 		DurationMs: r.DurationMs,
 		RepoSize:   r.RepoSize,
 		ErrorLog:   r.ErrorLog,
+		Output:     r.Output,
 		StartedAt:  startedAt,
 		FinishedAt: startedAt.Add(time.Duration(r.DurationMs) * time.Millisecond),
 		Snapshots:  snapshots,
@@ -44,12 +55,13 @@ func (r TaskResult) ToProtocol(agentID string, startedAt time.Time) protocol.Tas
 }
 
 type ExecutorConfig struct {
-	ConfigDir  string
-	RepoPath   string
-	BackupDirs []string
-	Excludes   []string
-	Retention  RetentionPolicy
-	RcloneArgs map[string]string
+	ConfigDir   string
+	RepoPath    string
+	BackupDirs  []string
+	Excludes    []string
+	Retention   RetentionPolicy
+	RcloneArgs  map[string]string
+	PlainBackup bool
 }
 
 type BackupProgress struct {
@@ -65,11 +77,13 @@ type ProgressCallback func(phase string, progress *BackupProgress)
 
 type resticExecutor interface {
 	InitRepo(ctx context.Context) error
+	Unlock(ctx context.Context) error
 	RunBackup(ctx context.Context, dirs []string, excludes []string) (string, error)
 	RunForget(ctx context.Context, retention RetentionPolicy) error
 	ListSnapshots(ctx context.Context) ([]SnapshotInfo, error)
 	RepositorySize(ctx context.Context) (int64, error)
 	RestoreSnapshot(ctx context.Context, snapshotID, targetPath string, includePaths []string) error
+	RunMaintenance(ctx context.Context, op MaintenanceOp) (string, error)
 }
 
 type resticExecutorWithProgress interface {
@@ -84,17 +98,49 @@ type Executor struct {
 }
 
 func NewExecutor(cfg ExecutorConfig) *Executor {
-	return &Executor{
-		restic: ResticRunner{
-			RcloneConfPath:  filepath.Join(cfg.ConfigDir, "rclone.conf"),
-			PasswordFile:    filepath.Join(cfg.ConfigDir, ".restic-password"),
+	rcloneConfPath := filepath.Join(cfg.ConfigDir, "rclone.conf")
+	passwordFile := filepath.Join(cfg.ConfigDir, ".restic-password")
+	rcloneArgs := copyStringMap(cfg.RcloneArgs)
+
+	// Use explicit PlainBackup flag from the policy if set.
+	// Otherwise fall back to checking the password file on disk.
+	usePlain := cfg.PlainBackup || !HasPasswordFile(passwordFile)
+
+	var runner resticExecutor
+	if usePlain {
+		log.Printf("using plain rclone backup (no encryption)")
+		runner = PlainRunner{
+			RcloneConfPath:  rcloneConfPath,
 			RepoPath:        cfg.RepoPath,
-			RcloneExtraArgs: copyStringMap(cfg.RcloneArgs),
-		},
+			RcloneExtraArgs: rcloneArgs,
+		}
+	} else {
+		log.Printf("using encrypted restic backup")
+		runner = ResticRunner{
+			RcloneConfPath:  rcloneConfPath,
+			PasswordFile:    passwordFile,
+			RepoPath:        cfg.RepoPath,
+			RcloneExtraArgs: rcloneArgs,
+		}
+	}
+
+	return &Executor{
+		restic:     runner,
 		backupDirs: append([]string(nil), cfg.BackupDirs...),
 		excludes:   append([]string(nil), cfg.Excludes...),
 		retention:  cfg.Retention,
 	}
+}
+
+// HasPasswordFile returns true if the restic password file exists and
+// contains a non-empty password. This is used to decide between
+// encrypted restic backups and plain rclone backups.
+func HasPasswordFile(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	return len(strings.TrimSpace(string(data))) > 0
 }
 
 func copyStringMap(values map[string]string) map[string]string {
@@ -122,11 +168,19 @@ func (e *Executor) RunBackupJob(ctx context.Context) (result TaskResult) {
 		result.ErrorLog = "init: " + err.Error()
 		return result
 	}
+	// Preflight: clear stale locks before backup. Non-fatal — if the repo is
+	// genuinely locked by an active process, the backup below will report it.
+	if err := e.restic.Unlock(ctx); err != nil {
+		log.Printf("pre-backup unlock failed (continuing): %v", err)
+	}
 	if _, err := e.restic.RunBackup(ctx, e.backupDirs, e.excludes); err != nil {
 		result.ErrorLog = "backup: " + err.Error()
 		return result
 	}
-	if err := e.restic.RunForget(ctx, e.retention); err != nil {
+	forgetCtx, cancelForget := context.WithTimeout(context.Background(), pruneHardTimeout)
+	err := e.restic.RunForget(forgetCtx, e.retention)
+	cancelForget()
+	if err != nil {
 		result.ErrorLog = "forget: " + err.Error()
 		return result
 	}
@@ -174,6 +228,10 @@ func (e *Executor) RunBackupJobWithProgress(ctx context.Context, progressFn Prog
 		result.ErrorLog = "init: " + err.Error()
 		return result
 	}
+	// Preflight: clear stale locks before backup (non-fatal).
+	if err := e.restic.Unlock(ctx); err != nil {
+		log.Printf("pre-backup unlock failed (continuing): %v", err)
+	}
 
 	emitProgress(progressFn, "backup", nil)
 	if progressRunner, ok := e.restic.(resticExecutorWithProgress); ok {
@@ -194,8 +252,11 @@ func (e *Executor) RunBackupJobWithProgress(ctx context.Context, progressFn Prog
 	}
 
 	emitProgress(progressFn, "forget", nil)
-	if err := e.restic.RunForget(ctx, e.retention); err != nil {
-		result.ErrorLog = "forget: " + err.Error()
+	forgetCtx, cancelForget := context.WithTimeout(context.Background(), pruneHardTimeout)
+	forgetErr := e.restic.RunForget(forgetCtx, e.retention)
+	cancelForget()
+	if forgetErr != nil {
+		result.ErrorLog = "forget: " + forgetErr.Error()
 		return result
 	}
 
@@ -232,4 +293,32 @@ func emitProgress(progressFn ProgressCallback, phase string, progress *BackupPro
 	if progressFn != nil {
 		progressFn(phase, progress)
 	}
+}
+
+func isDestructiveOp(op MaintenanceOp) bool {
+	return op == OpRepairSnapshots || op == OpPrune
+}
+
+func (e *Executor) RunMaintenanceJob(ctx context.Context, op MaintenanceOp) (result TaskResult) {
+	start := time.Now()
+	result = TaskResult{Type: "maintenance", Status: "failed"}
+	defer func() { result.DurationMs = time.Since(start).Milliseconds() }()
+
+	runCtx := ctx
+	if isDestructiveOp(op) {
+		// Destructive ops (repair snapshots / prune) must not be killed mid-run.
+		var cancel context.CancelFunc
+		runCtx, cancel = context.WithTimeout(context.Background(), pruneHardTimeout)
+		defer cancel()
+	}
+
+	out, err := e.restic.RunMaintenance(runCtx, op)
+	if err != nil {
+		result.ErrorLog = string(op) + ": " + err.Error()
+		result.Output = out
+		return result
+	}
+	result.Status = "success"
+	result.Output = out
+	return result
 }

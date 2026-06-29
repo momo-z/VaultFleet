@@ -60,6 +60,65 @@ func RegisterTaskRoutes(rg *gin.RouterGroup, h *TaskHandler) {
 	rg.GET("/tasks", h.List)
 	rg.POST("/tasks/:id/cancel", h.CancelTask)
 	rg.POST("/agents/:id/backup-now", h.BackupNow)
+	rg.POST("/agents/:id/maintenance", h.Maintenance)
+}
+
+var validMaintenanceOps = map[string]bool{
+	"unlock":           true,
+	"check":            true,
+	"repair_index":     true,
+	"repair_snapshots": true,
+	"prune":            true,
+}
+
+func (h *TaskHandler) Maintenance(c *gin.Context) {
+	agentID := c.Param("id")
+	if !agentExistsByID(c, h.DB, agentID) {
+		return
+	}
+
+	var req struct {
+		Operation string `json:"operation"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "invalid request body"})
+		return
+	}
+	if !validMaintenanceOps[req.Operation] {
+		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "invalid maintenance operation"})
+		return
+	}
+
+	msg, err := protocol.NewMessage(protocol.TypeMaintenance, protocol.MaintenancePayload{AgentID: agentID, Operation: req.Operation})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "encode maintenance request"})
+		return
+	}
+	commandService := h.commandService()
+
+	command, err := commandService.CreateCommand(contextFromGin(c), commands.CreateCommandInput{
+		AgentID:   agentID,
+		Type:      protocol.TypeMaintenance,
+		Message:   *msg,
+		TaskType:  "maintenance",
+		TaskState: commands.TaskStatusPending,
+	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "database error"})
+		return
+	}
+
+	if h.Hub != nil && h.Hub.IsOnline(agentID) {
+		if err := commandService.DispatchNewPendingForAgent(contextFromGin(c), agentID, 100); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": "database error"})
+			return
+		}
+	}
+
+	writeDataResponse(c, http.StatusAccepted, gin.H{
+		"command_id": command.ID,
+		"message_id": msg.ID,
+	})
 }
 
 func (h *TaskHandler) BackupNow(c *gin.Context) {

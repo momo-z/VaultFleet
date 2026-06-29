@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 
@@ -121,7 +122,7 @@ func TestCreateNotificationConfigValidatesTypeAndRequiredConfig(t *testing.T) {
 		{
 			name: "unknown type",
 			body: map[string]any{
-				"type":   "email",
+				"type":   "sms",
 				"config": map[string]any{},
 				"events": []string{"backup_failed"},
 			},
@@ -207,6 +208,48 @@ func TestCreateNotificationConfigValidatesTypeAndRequiredConfig(t *testing.T) {
 			require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
 		})
 	}
+}
+
+func TestEmailNotificationConfigEncryptsAndRedactsSMTPPassword(t *testing.T) {
+	setup := setupNotificationAPI(t)
+
+	w := postAnyJSON(t, setup.router, "/api/notifications", map[string]any{
+		"name": "Ops Email",
+		"type": "email",
+		"config": map[string]any{
+			"smtp_host":        "smtp.example.test",
+			"smtp_port":        587,
+			"smtp_security":    "starttls",
+			"smtp_username":    "ops@example.test",
+			"smtp_password":    "smtp-secret",
+			"from":             "ops@example.test",
+			"from_name":        "VaultFleet",
+			"to":               []string{"admin@example.test"},
+			"cc":               []string{"cc@example.test"},
+			"subject_template": "[VaultFleet] {{.Title}}",
+			"body_template":    "{{.Body}}",
+			"body_format":      "text",
+		},
+		"events": []string{"backup_failed"},
+	})
+
+	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
+	envelope := parseJSON(t, w)
+	assert.Equal(t, true, envelope["ok"])
+	body := requireMap(t, envelope["data"])
+	assert.Equal(t, "Ops Email", body["name"])
+	assert.Equal(t, "email", body["type"])
+	config := requireMap(t, body["config"])
+	assert.Equal(t, "smtp.example.test", config["smtp_host"])
+	assert.Equal(t, float64(587), config["smtp_port"])
+	assert.Equal(t, redactedSecretValue, config["smtp_password"])
+
+	var stored db.NotificationConfig
+	require.NoError(t, setup.database.DB.First(&stored, "id = ?", body["id"]).Error)
+	assert.NotContains(t, stored.Config, "smtp-secret")
+	plaintext, err := db.Decrypt(stored.Config, setup.database.MasterKey)
+	require.NoError(t, err)
+	assert.Contains(t, plaintext, `"smtp_password":"smtp-secret"`)
 }
 
 func TestListAndGetNotificationConfigsReturnEventArrays(t *testing.T) {
@@ -396,6 +439,51 @@ func TestUpdateWebhookNotificationConfigPreservesRedactedURLAndSecrets(t *testin
 	assert.JSONEq(t, `{"url":"https://hooks.example.test/secret-path?token=abc123","headers":{"Authorization":"Bearer old-secret","X-Trace":"new-trace"}}`, plaintext)
 }
 
+func TestUpdateEmailNotificationConfigPreservesRedactedSMTPPassword(t *testing.T) {
+	setup := setupNotificationAPI(t)
+	created := createNotificationConfigViaAPI(t, setup.router, "email", map[string]any{
+		"smtp_host":        "smtp.example.test",
+		"smtp_port":        587,
+		"smtp_security":    "starttls",
+		"smtp_username":    "ops@example.test",
+		"smtp_password":    "old-secret",
+		"from":             "ops@example.test",
+		"to":               []string{"admin@example.test"},
+		"subject_template": "{{.Title}}",
+		"body_template":    "{{.Body}}",
+		"body_format":      "text",
+	}, []string{"backup_failed"})
+	id := created["id"].(string)
+
+	w := putJSON(t, setup.router, "/api/notifications/"+id, map[string]any{
+		"config": map[string]any{
+			"smtp_host":        "smtp2.example.test",
+			"smtp_port":        465,
+			"smtp_security":    "tls",
+			"smtp_username":    "ops@example.test",
+			"smtp_password":    redactedSecretValue,
+			"from":             "ops@example.test",
+			"to":               []string{"admin@example.test", "backup@example.test"},
+			"subject_template": "{{.Title}}",
+			"body_template":    "{{.Body}}",
+			"body_format":      "text",
+		},
+	})
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	body := parseJSON(t, w)
+	config := requireMap(t, body["config"])
+	assert.Equal(t, redactedSecretValue, config["smtp_password"])
+	assert.Equal(t, "smtp2.example.test", config["smtp_host"])
+
+	var stored db.NotificationConfig
+	require.NoError(t, setup.database.DB.First(&stored, "id = ?", id).Error)
+	plaintext, err := db.Decrypt(stored.Config, setup.database.MasterKey)
+	require.NoError(t, err)
+	assert.Contains(t, plaintext, `"smtp_password":"old-secret"`)
+	assert.Contains(t, plaintext, `"smtp_host":"smtp2.example.test"`)
+}
+
 func TestUpdateNotificationConfigValidationAndNotFound(t *testing.T) {
 	setup := setupNotificationAPI(t)
 	created := createNotificationConfigViaAPI(t, setup.router, "webhook", map[string]any{"url": "https://hooks.example.test"}, []string{"backup_failed"})
@@ -462,6 +550,83 @@ func TestTestNotificationConfigSendsSampleNotification(t *testing.T) {
 	assert.NotEmpty(t, msg.Body)
 }
 
+func TestTestUnsavedNotificationConfigSendsSampleAndDoesNotPersist(t *testing.T) {
+	setup := setupNotificationAPI(t)
+	recorder := &apiRecordingNotifier{}
+	setup.handler.notifierFactory = func(notificationType string, raw json.RawMessage) (notify.Notifier, error) {
+		assert.Equal(t, "email", notificationType)
+		assert.JSONEq(t, `{"smtp_host":"smtp.example.test","smtp_port":587,"smtp_security":"starttls","smtp_username":"ops@example.test","smtp_password":"draft-secret","from":"ops@example.test","to":["admin@example.test"],"subject_template":"{{.Title}}","body_template":"{{.Body}}","body_format":"text"}`, string(raw))
+		return recorder, nil
+	}
+
+	w := postAnyJSON(t, setup.router, "/api/notifications/test", map[string]any{
+		"type":   "email",
+		"config": validEmailNotificationConfig("smtp.example.test", "draft-secret"),
+	})
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	body := parseJSON(t, w)
+	assert.Equal(t, true, body["ok"])
+	require.Len(t, recorder.sent, 1)
+	assert.Equal(t, "Test Notification", recorder.sent[0].Title)
+
+	var count int64
+	require.NoError(t, setup.database.DB.Model(&db.NotificationConfig{}).Count(&count).Error)
+	assert.Equal(t, int64(0), count)
+}
+
+func TestTestDraftNotificationConfigPreservesRedactedEmailPasswordAndDoesNotPersist(t *testing.T) {
+	setup := setupNotificationAPI(t)
+	created := createNotificationConfigViaAPI(t, setup.router, "email", validEmailNotificationConfig("smtp.example.test", "old-secret"), []string{"backup_failed"})
+	id := created["id"].(string)
+	recorder := &apiRecordingNotifier{}
+	setup.handler.notifierFactory = func(notificationType string, raw json.RawMessage) (notify.Notifier, error) {
+		assert.Equal(t, "email", notificationType)
+		assert.JSONEq(t, `{"smtp_host":"smtp2.example.test","smtp_port":465,"smtp_security":"tls","smtp_username":"ops@example.test","smtp_password":"old-secret","from":"ops@example.test","to":["admin@example.test"],"subject_template":"{{.Title}}","body_template":"{{.Body}}","body_format":"text"}`, string(raw))
+		return recorder, nil
+	}
+
+	w := postAnyJSON(t, setup.router, "/api/notifications/"+id+"/test-config", map[string]any{
+		"type": "email",
+		"config": map[string]any{
+			"smtp_host":        "smtp2.example.test",
+			"smtp_port":        465,
+			"smtp_security":    "tls",
+			"smtp_username":    "ops@example.test",
+			"smtp_password":    redactedSecretValue,
+			"from":             "ops@example.test",
+			"to":               []string{"admin@example.test"},
+			"subject_template": "{{.Title}}",
+			"body_template":    "{{.Body}}",
+			"body_format":      "text",
+		},
+	})
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.Len(t, recorder.sent, 1)
+
+	var stored db.NotificationConfig
+	require.NoError(t, setup.database.DB.First(&stored, "id = ?", id).Error)
+	plaintext, err := db.Decrypt(stored.Config, setup.database.MasterKey)
+	require.NoError(t, err)
+	assert.Contains(t, plaintext, `"smtp_host":"smtp.example.test"`)
+	assert.Contains(t, plaintext, `"smtp_password":"old-secret"`)
+	assert.NotContains(t, plaintext, "smtp2.example.test")
+}
+
+func TestTestUnsavedNotificationConfigValidatesConfig(t *testing.T) {
+	setup := setupNotificationAPI(t)
+
+	w := postAnyJSON(t, setup.router, "/api/notifications/test", map[string]any{
+		"type": "email",
+		"config": map[string]any{
+			"smtp_host": "smtp.example.test",
+		},
+	})
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+}
+
 func TestTestNotificationConfigReturnsSendAndNotFoundErrors(t *testing.T) {
 	setup := setupNotificationAPI(t)
 	created := createNotificationConfigViaAPI(t, setup.router, "webhook", map[string]any{"url": "https://hooks.example.test"}, []string{"backup_failed"})
@@ -474,6 +639,22 @@ func TestTestNotificationConfigReturnsSendAndNotFoundErrors(t *testing.T) {
 
 	w = postAnyJSON(t, setup.router, "/api/notifications/missing/test", map[string]any{})
 	require.Equal(t, http.StatusNotFound, w.Code)
+}
+
+func TestTestNotificationConfigReturnsSanitizedSendDetail(t *testing.T) {
+	setup := setupNotificationAPI(t)
+	created := createNotificationConfigViaAPI(t, setup.router, "email", validEmailNotificationConfig("smtp.example.test", "smtp-secret"), []string{"backup_failed"})
+	setup.handler.notifierFactory = func(string, json.RawMessage) (notify.Notifier, error) {
+		return &apiRecordingNotifier{err: errors.New("connect smtp server: dial tcp smtp.example.test:587: connection refused")}, nil
+	}
+
+	w := postAnyJSON(t, setup.router, "/api/notifications/"+created["id"].(string)+"/test", map[string]any{})
+
+	require.Equal(t, http.StatusBadGateway, w.Code)
+	body := parseJSON(t, w)
+	assert.Equal(t, "send notification failed", body["error"])
+	assert.Contains(t, body["detail"], "connect smtp server")
+	assert.NotContains(t, w.Body.String(), "smtp-secret")
 }
 
 func createNotificationConfigViaAPI(t *testing.T, router http.Handler, notificationType string, config map[string]any, events []string) map[string]any {
@@ -510,4 +691,19 @@ func (n *apiRecordingNotifier) Send(_ context.Context, msg notify.NotifyMessage)
 
 func (n *apiRecordingNotifier) Type() string {
 	return "recording"
+}
+
+func validEmailNotificationConfig(host string, password string) map[string]any {
+	return map[string]any{
+		"smtp_host":        host,
+		"smtp_port":        587,
+		"smtp_security":    "starttls",
+		"smtp_username":    "ops@example.test",
+		"smtp_password":    password,
+		"from":             "ops@example.test",
+		"to":               []string{"admin@example.test"},
+		"subject_template": "{{.Title}}",
+		"body_template":    "{{.Body}}",
+		"body_format":      "text",
+	}
 }

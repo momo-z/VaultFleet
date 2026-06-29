@@ -1,5 +1,6 @@
 import { Agent, ApiAgent, CreateAgentResponse } from "@/types/agent";
 import { BrowseRequest, BrowseResponse, DirSizeRequest, DirSizeResponse } from "@/types/api";
+import { MaintenanceOperation } from "@/types/maintenance";
 import { apiDelete, apiGet, apiPost } from "./http";
 
 export const listAgents = async () => (await apiGet<ApiAgent[]>("/api/agents")).map(normalizeAgent);
@@ -11,6 +12,7 @@ export const getInstallToken = (id: string) => apiGet<{ id: string; enroll_token
 export const browseAgent = (id: string, body: BrowseRequest) => apiPost<BrowseResponse>(`/api/agents/${id}/browse`, body);
 export const dirSizeAgent = (id: string, body: DirSizeRequest) => apiPost<DirSizeResponse>(`/api/agents/${id}/dir-size`, body);
 export const backupNow = (id: string) => apiPost<{ command_id: string; message_id: string }>(`/api/agents/${id}/backup-now`);
+export const triggerMaintenance = (id: string, operation: MaintenanceOperation) => apiPost<{ command_id: string; message_id: string }>(`/api/agents/${id}/maintenance`, { operation });
 
 export function normalizeAgent(agent: ApiAgent): Agent {
   const systemInfo = parseSystemInfo(agent.system_info);

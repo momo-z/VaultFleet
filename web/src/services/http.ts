@@ -60,7 +60,12 @@ function isObject(value: unknown): value is Record<string, unknown> {
 }
 
 function errorMessage(body: unknown, fallback: string): string {
-  if (isObject(body) && typeof body.error === "string") return body.error;
+  if (isObject(body) && typeof body.error === "string") {
+    if (typeof body.detail === "string" && body.detail.trim()) {
+      return `${body.error}: ${body.detail}`;
+    }
+    return body.error;
+  }
   if (typeof body === "string" && body.trim()) return body;
   return fallback;
 }

@@ -11,6 +11,7 @@ import { NotificationConfig, NotificationInput } from "@/types/notification";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Plus, Bell, Settings2, Trash2, MoreHorizontal, Send, Check } from "lucide-react";
 import {
@@ -33,6 +34,58 @@ const EVENT_OPTIONS = [
   { id: "agent_offline", label: "节点离线" },
 ];
 
+type NotificationType = NotificationInput["type"];
+
+const DEFAULT_SUBJECT_TEMPLATE = "[VaultFleet] {{.Title}} - {{.AgentName}}";
+const DEFAULT_BODY_TEMPLATE = "{{.Title}}\nLevel: {{.Level}}\nAgent: {{.AgentName}}\nTime: {{.Timestamp}}\n\n{{.Body}}";
+
+function defaultConfigForType(type: NotificationType): Record<string, unknown> {
+  switch (type) {
+    case "telegram":
+      return { bot_token: "", chat_id: "" };
+    case "webhook":
+      return { url: "" };
+    case "email":
+      return {
+        smtp_host: "",
+        smtp_port: 587,
+        smtp_security: "starttls",
+        smtp_username: "",
+        smtp_password: "",
+        from: "",
+        from_name: "VaultFleet",
+        to: [],
+        cc: [],
+        bcc: [],
+        subject_template: DEFAULT_SUBJECT_TEMPLATE,
+        body_template: DEFAULT_BODY_TEMPLATE,
+        body_format: "text",
+      };
+  }
+}
+
+function configString(config: Record<string, unknown>, key: string) {
+  const value = config[key];
+  if (typeof value === "string") return value;
+  if (typeof value === "number") return String(value);
+  return "";
+}
+
+function configListText(config: Record<string, unknown>, key: string) {
+  const value = config[key];
+  if (Array.isArray(value)) {
+    return value.filter((item): item is string => typeof item === "string").join("\n");
+  }
+  return typeof value === "string" ? value : "";
+}
+
+function parseConfigList(value: string) {
+  return value
+    .split(/[\n,]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 export function NotificationsPage() {
   const queryClient = useQueryClient();
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
@@ -43,7 +96,7 @@ export function NotificationsPage() {
   const [formData, setFormData] = useState<NotificationInput>({
     name: "",
     type: "telegram",
-    config: { bot_token: "", chat_id: "" },
+    config: defaultConfigForType("telegram"),
     events: ["backup_failed", "agent_offline"],
   });
 
@@ -115,7 +168,7 @@ export function NotificationsPage() {
       setFormData({
         name: "",
         type: "telegram",
-        config: { bot_token: "", chat_id: "" },
+        config: defaultConfigForType("telegram"),
         events: ["backup_failed", "agent_offline"],
       });
       createMutation.reset();
@@ -139,6 +192,10 @@ export function NotificationsPage() {
     setFormData({ ...formData, events: newEvents });
   };
 
+  const updateConfig = (key: string, value: unknown) => {
+    setFormData({ ...formData, config: { ...formData.config, [key]: value } });
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -149,7 +206,7 @@ export function NotificationsPage() {
               <Plus className="mr-2 h-4 w-4" /> 添加通知
             </Button>
           </SheetTrigger>
-          <SheetContent className="sm:max-w-md">
+          <SheetContent className="sm:max-w-xl">
             <SheetHeader>
               <SheetTitle>{editingId ? "编辑通知" : "添加新通知"}</SheetTitle>
               <SheetDescription>
@@ -174,10 +231,10 @@ export function NotificationsPage() {
                 <Label htmlFor="type">通知类型</Label>
                 <Select
                   value={formData.type}
-                  onValueChange={(val: any) => setFormData({ 
+                  onValueChange={(val: NotificationType) => setFormData({
                     ...formData, 
                     type: val, 
-                    config: val === "telegram" ? { bot_token: "", chat_id: "" } : { url: "" } 
+                    config: defaultConfigForType(val)
                   })}
                 >
                   <SelectTrigger>
@@ -186,6 +243,7 @@ export function NotificationsPage() {
                   <SelectContent>
                     <SelectItem value="telegram">Telegram Bot</SelectItem>
                     <SelectItem value="webhook">Generic Webhook</SelectItem>
+                    <SelectItem value="email">Email SMTP</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -199,34 +257,178 @@ export function NotificationsPage() {
                       <Input
                         id="bot_token"
                         type="password"
-                        value={formData.config.bot_token || ""}
-                        onChange={(e) => setFormData({ ...formData, config: { ...formData.config, bot_token: e.target.value }})}
-                        placeholder={formData.config.bot_token === "[redacted]" ? "已加密 (输入以修改)" : "123456789:ABC..."}
-                        required={formData.config.bot_token !== "[redacted]"}
+                        value={configString(formData.config, "bot_token")}
+                        onChange={(e) => updateConfig("bot_token", e.target.value)}
+                        placeholder={configString(formData.config, "bot_token") === "[redacted]" ? "已加密 (输入以修改)" : "123456789:ABC..."}
+                        required={configString(formData.config, "bot_token") !== "[redacted]"}
                       />
                     </div>
                     <div className="space-y-2">
                       <Label htmlFor="chat_id">Chat ID</Label>
                       <Input
                         id="chat_id"
-                        value={formData.config.chat_id || ""}
-                        onChange={(e) => setFormData({ ...formData, config: { ...formData.config, chat_id: e.target.value }})}
+                        value={configString(formData.config, "chat_id")}
+                        onChange={(e) => updateConfig("chat_id", e.target.value)}
                         placeholder="-100..."
                         required
                       />
                     </div>
                   </>
-                ) : (
+                ) : formData.type === "webhook" ? (
                   <div className="space-y-2">
                     <Label htmlFor="webhook_url">Webhook URL</Label>
                     <Input
                       id="webhook_url"
-                      value={formData.config.url || ""}
-                      onChange={(e) => setFormData({ ...formData, config: { ...formData.config, url: e.target.value }})}
+                      value={configString(formData.config, "url")}
+                      onChange={(e) => updateConfig("url", e.target.value)}
                       placeholder="https://hooks.slack.com/..."
                       required
                     />
                   </div>
+                ) : (
+                  <>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-2">
+                        <Label htmlFor="smtp_host">SMTP 主机</Label>
+                        <Input
+                          id="smtp_host"
+                          value={configString(formData.config, "smtp_host")}
+                          onChange={(e) => updateConfig("smtp_host", e.target.value)}
+                          placeholder="smtp.example.com"
+                          required
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="smtp_port">端口</Label>
+                        <Input
+                          id="smtp_port"
+                          type="number"
+                          min={1}
+                          max={65535}
+                          value={configString(formData.config, "smtp_port")}
+                          onChange={(e) => updateConfig("smtp_port", Number(e.target.value))}
+                          required
+                        />
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="smtp_security">加密方式</Label>
+                      <Select value={configString(formData.config, "smtp_security") || "starttls"} onValueChange={(value) => updateConfig("smtp_security", value)}>
+                        <SelectTrigger id="smtp_security">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="starttls">STARTTLS</SelectItem>
+                          <SelectItem value="tls">TLS</SelectItem>
+                          <SelectItem value="none">无</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-2">
+                        <Label htmlFor="smtp_username">用户名</Label>
+                        <Input
+                          id="smtp_username"
+                          value={configString(formData.config, "smtp_username")}
+                          onChange={(e) => updateConfig("smtp_username", e.target.value)}
+                          placeholder="ops@example.com"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="smtp_password">密码</Label>
+                        <Input
+                          id="smtp_password"
+                          type="password"
+                          value={configString(formData.config, "smtp_password")}
+                          onChange={(e) => updateConfig("smtp_password", e.target.value)}
+                          placeholder={configString(formData.config, "smtp_password") === "[redacted]" ? "已加密 (输入以修改)" : "SMTP 密码"}
+                        />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-2">
+                        <Label htmlFor="from">发件人邮箱</Label>
+                        <Input
+                          id="from"
+                          type="email"
+                          value={configString(formData.config, "from")}
+                          onChange={(e) => updateConfig("from", e.target.value)}
+                          placeholder="ops@example.com"
+                          required
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="from_name">发件人名称</Label>
+                        <Input
+                          id="from_name"
+                          value={configString(formData.config, "from_name")}
+                          onChange={(e) => updateConfig("from_name", e.target.value)}
+                          placeholder="VaultFleet"
+                        />
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="email_to">收件人</Label>
+                      <Textarea
+                        id="email_to"
+                        value={configListText(formData.config, "to")}
+                        onChange={(e) => updateConfig("to", parseConfigList(e.target.value))}
+                        placeholder="admin@example.com"
+                        required
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="space-y-2">
+                        <Label htmlFor="email_cc">抄送</Label>
+                        <Textarea
+                          id="email_cc"
+                          value={configListText(formData.config, "cc")}
+                          onChange={(e) => updateConfig("cc", parseConfigList(e.target.value))}
+                          placeholder="cc@example.com"
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="email_bcc">密送</Label>
+                        <Textarea
+                          id="email_bcc"
+                          value={configListText(formData.config, "bcc")}
+                          onChange={(e) => updateConfig("bcc", parseConfigList(e.target.value))}
+                          placeholder="bcc@example.com"
+                        />
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="subject_template">主题模板</Label>
+                      <Input
+                        id="subject_template"
+                        value={configString(formData.config, "subject_template")}
+                        onChange={(e) => updateConfig("subject_template", e.target.value)}
+                        required
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="body_format">正文格式</Label>
+                      <Select value={configString(formData.config, "body_format") || "text"} onValueChange={(value) => updateConfig("body_format", value)}>
+                        <SelectTrigger id="body_format">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="text">纯文本</SelectItem>
+                          <SelectItem value="html">HTML</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="body_template">正文模板</Label>
+                      <Textarea
+                        id="body_template"
+                        className="min-h-36 font-mono text-xs"
+                        value={configString(formData.config, "body_template")}
+                        onChange={(e) => updateConfig("body_template", e.target.value)}
+                        required
+                      />
+                    </div>
+                  </>
                 )}
               </div>
 

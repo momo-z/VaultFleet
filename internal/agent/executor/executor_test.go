@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,8 +14,12 @@ import (
 )
 
 func TestNewExecutorBuildsRunnerAndCopiesConfig(t *testing.T) {
+	cfgDir := t.TempDir()
+	os.MkdirAll(cfgDir, 0o700)
+	os.WriteFile(filepath.Join(cfgDir, ".restic-password"), []byte("secret"), 0o600)
+
 	cfg := ExecutorConfig{
-		ConfigDir:  "/var/lib/vaultfleet",
+		ConfigDir:  cfgDir,
 		RepoPath:   "repo/agent-1",
 		BackupDirs: []string{"/home/alice", "/etc"},
 		Excludes:   []string{"*.tmp"},
@@ -57,8 +62,12 @@ func TestNewExecutorBuildsRunnerAndCopiesConfig(t *testing.T) {
 }
 
 func TestNewExecutorPassesRcloneArgsToRunner(t *testing.T) {
+	cfgDir := t.TempDir()
+	os.MkdirAll(cfgDir, 0o700)
+	os.WriteFile(filepath.Join(cfgDir, ".restic-password"), []byte("secret"), 0o600)
+
 	cfg := ExecutorConfig{
-		ConfigDir: "/var/lib/vaultfleet",
+		ConfigDir: cfgDir,
 		RepoPath:  "repo/agent-1",
 		RcloneArgs: map[string]string{
 			"transfers": "2",
@@ -82,6 +91,43 @@ func TestNewExecutorPassesRcloneArgsToRunner(t *testing.T) {
 	cfg.RcloneArgs["transfers"] = "99"
 	if runner.RcloneExtraArgs["transfers"] != "2" {
 		t.Fatalf("RcloneExtraArgs were not copied: %#v", runner.RcloneExtraArgs)
+	}
+}
+
+func TestNewExecutorUsesPlainRunnerWhenNoPasswordFile(t *testing.T) {
+	cfg := ExecutorConfig{
+		ConfigDir:  t.TempDir(),
+		RepoPath:   "repo/agent-1",
+		BackupDirs: []string{"/data"},
+	}
+
+	executor := NewExecutor(cfg)
+
+	if executor.restic == nil {
+		t.Fatal("NewExecutor() runner is nil")
+	}
+	runner, ok := executor.restic.(PlainRunner)
+	if !ok {
+		t.Fatalf("NewExecutor() runner type = %T, want PlainRunner", executor.restic)
+	}
+	if runner.RepoPath != cfg.RepoPath {
+		t.Fatalf("RepoPath = %q, want %q", runner.RepoPath, cfg.RepoPath)
+	}
+}
+
+func TestNewExecutorUsesPlainRunnerWhenPasswordFileIsEmpty(t *testing.T) {
+	cfgDir := t.TempDir()
+	os.WriteFile(filepath.Join(cfgDir, ".restic-password"), []byte("  \n  "), 0o600)
+
+	cfg := ExecutorConfig{
+		ConfigDir: cfgDir,
+		RepoPath:  "repo/agent-1",
+	}
+
+	executor := NewExecutor(cfg)
+
+	if _, ok := executor.restic.(PlainRunner); !ok {
+		t.Fatalf("NewExecutor() runner type = %T, want PlainRunner (empty password)", executor.restic)
 	}
 }
 
@@ -122,7 +168,7 @@ func TestRunBackupJobSuccessReturnsLatestSnapshotAndSnapshots(t *testing.T) {
 	if result.DurationMs <= 0 {
 		t.Fatalf("DurationMs = %d, want positive duration", result.DurationMs)
 	}
-	assertRunnerCalls(t, runner.calls, []string{"init", "backup", "forget", "snapshots", "stats"})
+	assertRunnerCalls(t, runner.calls, []string{"init", "unlock", "backup", "forget", "snapshots", "stats"})
 }
 
 func TestRunBackupJobFailsWhenRepositorySizeCannotBeRead(t *testing.T) {
@@ -144,7 +190,7 @@ func TestRunBackupJobFailsWhenRepositorySizeCannotBeRead(t *testing.T) {
 	if !strings.Contains(result.ErrorLog, "stats: repository locked") {
 		t.Fatalf("ErrorLog = %q, want stats stage and error", result.ErrorLog)
 	}
-	assertRunnerCalls(t, runner.calls, []string{"init", "backup", "forget", "snapshots", "stats"})
+	assertRunnerCalls(t, runner.calls, []string{"init", "unlock", "backup", "forget", "snapshots", "stats"})
 }
 
 func TestRunBackupJobFailureStopsAtStageAndReturnsErrorLog(t *testing.T) {
@@ -163,7 +209,7 @@ func TestRunBackupJobFailureStopsAtStageAndReturnsErrorLog(t *testing.T) {
 	if !strings.Contains(result.ErrorLog, "backup: disk read failed") {
 		t.Fatalf("ErrorLog = %q, want backup stage and error", result.ErrorLog)
 	}
-	assertRunnerCalls(t, runner.calls, []string{"init", "backup"})
+	assertRunnerCalls(t, runner.calls, []string{"init", "unlock", "backup"})
 }
 
 func TestRunBackupJobWithProgressReportsPhasesAndUsesProgressRunner(t *testing.T) {
@@ -193,7 +239,7 @@ func TestRunBackupJobWithProgressReportsPhasesAndUsesProgressRunner(t *testing.T
 	if result.Status != "success" {
 		t.Fatalf("Status = %q, want success; error log: %q", result.Status, result.ErrorLog)
 	}
-	assertRunnerCalls(t, runner.calls, []string{"init", "backup_with_progress", "forget", "snapshots", "stats"})
+	assertRunnerCalls(t, runner.calls, []string{"init", "unlock", "backup_with_progress", "forget", "snapshots", "stats"})
 	wantPhases := []string{"init", "backup", "backup", "backup", "forget", "stats"}
 	if strings.Join(phases, ",") != strings.Join(wantPhases, ",") {
 		t.Fatalf("progress phases = %#v, want %#v", phases, wantPhases)
@@ -229,7 +275,7 @@ func TestRunBackupJobWithProgressFallsBackToPlainBackupRunner(t *testing.T) {
 	if result.SnapshotID != "snap-plain" {
 		t.Fatalf("SnapshotID = %q, want snap-plain", result.SnapshotID)
 	}
-	assertRunnerCalls(t, runner.calls, []string{"init", "backup", "forget", "snapshots", "stats"})
+	assertRunnerCalls(t, runner.calls, []string{"init", "unlock", "backup", "forget", "snapshots", "stats"})
 }
 
 func TestTaskResultJSONUsesSnakeCaseProtocolKeys(t *testing.T) {
@@ -379,11 +425,19 @@ type recordingRunner struct {
 	repoSize    int64
 	statsErr    error
 	restoreErr  error
+	unlockErr   error
+	maintErr    error
+	maintOut    string
 }
 
 func (r *recordingRunner) InitRepo(context.Context) error {
 	r.calls = append(r.calls, "init")
 	return r.initErr
+}
+
+func (r *recordingRunner) Unlock(context.Context) error {
+	r.calls = append(r.calls, "unlock")
+	return r.unlockErr
 }
 
 func (r *recordingRunner) RunBackup(_ context.Context, dirs []string, excludes []string) (string, error) {
@@ -420,8 +474,13 @@ func (r *recordingRunner) RunBackupWithProgress(_ context.Context, dirs []string
 	return r.backupOut, r.backupErr
 }
 
-func (r *recordingRunner) RunForget(_ context.Context, retention RetentionPolicy) error {
-	r.calls = append(r.calls, "forget")
+func (r *recordingRunner) RunForget(ctx context.Context, retention RetentionPolicy) error {
+	select {
+	case <-ctx.Done():
+		r.calls = append(r.calls, "forget_cancelled")
+	default:
+		r.calls = append(r.calls, "forget")
+	}
 	return r.forgetErr
 }
 
@@ -440,6 +499,16 @@ func (r *recordingRunner) RestoreSnapshot(context.Context, string, string, []str
 	return r.restoreErr
 }
 
+func (r *recordingRunner) RunMaintenance(ctx context.Context, op MaintenanceOp) (string, error) {
+	select {
+	case <-ctx.Done():
+		r.calls = append(r.calls, "maint:"+string(op)+":cancelled")
+	default:
+		r.calls = append(r.calls, "maint:"+string(op))
+	}
+	return r.maintOut, r.maintErr
+}
+
 type plainRecordingRunner struct {
 	calls     []string
 	backupErr error
@@ -450,6 +519,11 @@ type plainRecordingRunner struct {
 
 func (r *plainRecordingRunner) InitRepo(context.Context) error {
 	r.calls = append(r.calls, "init")
+	return nil
+}
+
+func (r *plainRecordingRunner) Unlock(context.Context) error {
+	r.calls = append(r.calls, "unlock")
 	return nil
 }
 
@@ -476,6 +550,48 @@ func (r *plainRecordingRunner) RepositorySize(context.Context) (int64, error) {
 func (r *plainRecordingRunner) RestoreSnapshot(context.Context, string, string, []string) error {
 	r.calls = append(r.calls, "restore")
 	return nil
+}
+
+func (r *plainRecordingRunner) RunMaintenance(context.Context, MaintenanceOp) (string, error) {
+	return "", nil
+}
+
+func TestRunMaintenanceJobPruneUsesIndependentCtx(t *testing.T) {
+	runner := &recordingRunner{maintOut: "pruned"}
+	executor := &Executor{restic: runner}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	result := executor.RunMaintenanceJob(ctx, OpPrune)
+
+	if result.Status != "success" {
+		t.Fatalf("status = %q, want success (err=%q)", result.Status, result.ErrorLog)
+	}
+	for _, c := range runner.calls {
+		if c == "maint:prune:cancelled" {
+			t.Fatal("prune received cancelled ctx; must use independent ctx")
+		}
+	}
+}
+
+func TestRunMaintenanceJobCheckReturnsOutput(t *testing.T) {
+	runner := &recordingRunner{maintOut: "no errors were found"}
+	executor := &Executor{restic: runner}
+	result := executor.RunMaintenanceJob(context.Background(), OpCheck)
+	if result.Status != "success" || result.Output != "no errors were found" {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestRecordingRunnerImplementsUnlock(t *testing.T) {
+	var _ resticExecutor = (*recordingRunner)(nil)
+	r := &recordingRunner{}
+	if err := r.Unlock(context.Background()); err != nil {
+		t.Fatalf("Unlock() error = %v, want nil", err)
+	}
+	if len(r.calls) != 1 || r.calls[0] != "unlock" {
+		t.Fatalf("calls = %#v, want [unlock]", r.calls)
+	}
 }
 
 func assertRunnerCalls(t *testing.T, got, want []string) {
@@ -518,5 +634,64 @@ func assertProtocolResult(t *testing.T, got, want protocol.TaskResultPayload) {
 	}
 	if !got.FinishedAt.Equal(want.FinishedAt) {
 		t.Fatalf("FinishedAt = %s, want %s", got.FinishedAt, want.FinishedAt)
+	}
+}
+
+func TestRunBackupJobCallsUnlockBeforeBackup(t *testing.T) {
+	runner := &recordingRunner{
+		snapshots: []SnapshotInfo{{ID: "s1", Time: time.Now()}},
+		repoSize:  100,
+	}
+	executor := &Executor{restic: runner}
+
+	result := executor.RunBackupJob(context.Background())
+
+	if result.Status != "success" {
+		t.Fatalf("status = %q, want success (err=%q)", result.Status, result.ErrorLog)
+	}
+	assertRunnerCalls(t, runner.calls, []string{"init", "unlock", "backup", "forget", "snapshots", "stats"})
+}
+
+func TestRunBackupJobContinuesWhenUnlockFails(t *testing.T) {
+	runner := &recordingRunner{
+		unlockErr: errors.New("unlock boom"),
+		snapshots: []SnapshotInfo{{ID: "s1", Time: time.Now()}},
+		repoSize:  100,
+	}
+	executor := &Executor{restic: runner}
+
+	result := executor.RunBackupJob(context.Background())
+
+	if result.Status != "success" {
+		t.Fatalf("status = %q, want success despite unlock failure (err=%q)", result.Status, result.ErrorLog)
+	}
+	assertRunnerCalls(t, runner.calls, []string{"init", "unlock", "backup", "forget", "snapshots", "stats"})
+}
+
+func TestForgetUsesIndependentContextNotCancelledByTaskCtx(t *testing.T) {
+	runner := &recordingRunner{
+		snapshots: []SnapshotInfo{{ID: "s1", Time: time.Now()}},
+		repoSize:  100,
+	}
+	executor := &Executor{restic: runner}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // 任务 ctx 立即取消
+
+	_ = executor.RunBackupJob(ctx)
+
+	for _, c := range runner.calls {
+		if c == "forget_cancelled" {
+			t.Fatal("forget received a cancelled context; it must use an independent ctx")
+		}
+	}
+	foundForget := false
+	for _, c := range runner.calls {
+		if c == "forget" {
+			foundForget = true
+		}
+	}
+	if !foundForget {
+		t.Fatalf("forget was not called; calls = %#v", runner.calls)
 	}
 }

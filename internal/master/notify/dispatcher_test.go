@@ -27,10 +27,15 @@ func TestNewNotifierFromConfigBuildsTelegramAndWebhook(t *testing.T) {
 	wh, err := NewNotifierFromConfig("webhook", whConfig)
 	require.NoError(t, err)
 	assert.Equal(t, "webhook", wh.Type())
+
+	emailConfig := json.RawMessage(`{"smtp_host":"smtp.example.test","smtp_port":587,"smtp_security":"starttls","smtp_username":"ops@example.test","smtp_password":"secret","from":"ops@example.test","to":["admin@example.test"],"subject_template":"{{.Title}}","body_template":"{{.Body}}","body_format":"text"}`)
+	email, err := NewNotifierFromConfig("email", emailConfig)
+	require.NoError(t, err)
+	assert.Equal(t, "email", email.Type())
 }
 
 func TestNewNotifierFromConfigRejectsUnknownOrInvalidConfig(t *testing.T) {
-	_, err := NewNotifierFromConfig("email", json.RawMessage(`{}`))
+	_, err := NewNotifierFromConfig("sms", json.RawMessage(`{}`))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown notification type")
 
@@ -41,6 +46,10 @@ func TestNewNotifierFromConfigRejectsUnknownOrInvalidConfig(t *testing.T) {
 	_, err = NewNotifierFromConfig("webhook", json.RawMessage(`{"headers":{"X-Test":"value"}}`))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "url")
+
+	_, err = NewNotifierFromConfig("email", json.RawMessage(`{"smtp_host":"smtp.example.test"}`))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "smtp_port")
 }
 
 func TestNewNotifierFromConfigRejectsUnknownFieldsInvalidHeadersAndWebhookURL(t *testing.T) {
@@ -173,6 +182,53 @@ func TestDispatcherSendsDirectBackupFailedEventOnlyToMatchingConfigs(t *testing.
 	assert.Equal(t, "Tokyo-1", msg.AgentName)
 	assert.Equal(t, "repository locked", msg.Body)
 	assert.False(t, msg.Timestamp.IsZero())
+}
+
+func TestMaintenanceCheckFailedProducesCorruptionAlert(t *testing.T) {
+	dispatcher := NewDispatcher(nil, nil)
+
+	t.Run("failed status", func(t *testing.T) {
+		msg, _, ok := dispatcher.notificationForEvent(events.Event{
+			Type: events.TaskResult,
+			Payload: protocol.TaskResultPayload{
+				AgentID:  "agent-1",
+				TaskType: "maintenance",
+				Status:   "failed",
+				Output:   "repository contains errors",
+			},
+		})
+		require.True(t, ok)
+		assert.Contains(t, msg.Title, "Corruption")
+		assert.Equal(t, LevelError, msg.Level)
+		assert.Contains(t, msg.Body, "repository contains errors")
+	})
+
+	t.Run("corruption marker in output", func(t *testing.T) {
+		msg, _, ok := dispatcher.notificationForEvent(events.Event{
+			Type: events.TaskResult,
+			Payload: protocol.TaskResultPayload{
+				AgentID:  "agent-1",
+				TaskType: "maintenance",
+				Status:   "success",
+				Output:   "pack 1234 is not known\nrepository is damaged",
+			},
+		})
+		require.True(t, ok)
+		assert.Contains(t, msg.Title, "Corruption")
+	})
+
+	t.Run("successful check produces no alert", func(t *testing.T) {
+		_, _, ok := dispatcher.notificationForEvent(events.Event{
+			Type: events.TaskResult,
+			Payload: protocol.TaskResultPayload{
+				AgentID:  "agent-1",
+				TaskType: "maintenance",
+				Status:   "success",
+				Output:   "no errors were found",
+			},
+		})
+		assert.False(t, ok)
+	})
 }
 
 func TestDispatcherIgnoresSuccessfulOrNonBackupTaskResults(t *testing.T) {

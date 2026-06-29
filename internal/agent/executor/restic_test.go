@@ -1100,3 +1100,150 @@ func prependPath(t *testing.T, dir string) {
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
+
+func TestCommandSendsSigtermOnContextCancel(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("signal behavior test not supported on windows")
+	}
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "got-term")
+
+	// fake restic: 捕获 TERM，写标记文件后退出；否则睡到被杀。
+	script := "#!/bin/sh\n" +
+		"trap 'touch " + marker + "; exit 0' TERM\n" +
+		"sleep 5 &\n" +
+		"wait\n"
+	if err := os.WriteFile(filepath.Join(dir, "restic"), []byte(script), 0o700); err != nil {
+		t.Fatalf("write fake restic: %v", err)
+	}
+	prependPath(t, dir)
+
+	pwFile := writeTempPasswordFile(t, "secret")
+	runner := ResticRunner{RcloneConfPath: "/tmp/rclone.conf", PasswordFile: pwFile, RepoPath: "repo"}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := runner.command(ctx, "snapshots")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	cancel()
+	_ = cmd.Wait()
+
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("fake restic did not receive SIGTERM (marker missing): %v", err)
+	}
+}
+
+func TestBuildUnlockCmdUsesBaseArgsWithoutRemoveAll(t *testing.T) {
+	pwFile := writeTempPasswordFile(t, "secret")
+	runner := ResticRunner{
+		RcloneConfPath: "/tmp/rclone.conf",
+		PasswordFile:   pwFile,
+		RepoPath:       "repo",
+	}
+
+	cmd := runner.buildUnlockCmdContext(context.Background())
+
+	assertArgsEqual(t, cmd.Args, []string{
+		"restic",
+		"unlock",
+		"-r",
+		"rclone:vaultfleet:repo",
+		"--password-file",
+		pwFile,
+		"-o",
+		"rclone.args=serve restic --stdio --config /tmp/rclone.conf",
+	})
+	for _, a := range cmd.Args {
+		if a == "--remove-all" {
+			t.Fatal("unlock must not include --remove-all")
+		}
+	}
+}
+
+func TestUnlockRunsResticUnlockSuccessfully(t *testing.T) {
+	dir := t.TempDir()
+	writeFakeResticRouter(t, dir, map[string]fakeResticScript{
+		"unlock": {Stdout: "successfully removed 1 locks\n"},
+	})
+	prependPath(t, dir)
+
+	pwFile := writeTempPasswordFile(t, "secret")
+	runner := ResticRunner{RcloneConfPath: "/tmp/rclone.conf", PasswordFile: pwFile, RepoPath: "repo"}
+
+	if err := runner.Unlock(context.Background()); err != nil {
+		t.Fatalf("Unlock() error = %v, want nil", err)
+	}
+}
+
+func TestUnlockReturnsErrorOnResticFailure(t *testing.T) {
+	dir := t.TempDir()
+	writeFakeResticRouter(t, dir, map[string]fakeResticScript{
+		"unlock": {Stderr: "unlock failed\n", Exit: 1},
+	})
+	prependPath(t, dir)
+
+	pwFile := writeTempPasswordFile(t, "secret")
+	runner := ResticRunner{RcloneConfPath: "/tmp/rclone.conf", PasswordFile: pwFile, RepoPath: "repo"}
+
+	err := runner.Unlock(context.Background())
+	if err == nil {
+		t.Fatal("Unlock() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "run restic unlock") {
+		t.Fatalf("Unlock() error = %q, want it to mention 'run restic unlock'", err.Error())
+	}
+}
+
+func TestBuildMaintenanceCmds(t *testing.T) {
+	pwFile := writeTempPasswordFile(t, "secret")
+	runner := ResticRunner{RcloneConfPath: "/tmp/rclone.conf", PasswordFile: pwFile, RepoPath: "repo"}
+	base := []string{
+		"-r", "rclone:vaultfleet:repo",
+		"--password-file", pwFile,
+		"-o", "rclone.args=serve restic --stdio --config /tmp/rclone.conf",
+	}
+	cases := []struct {
+		name string
+		cmd  func() []string
+		head []string
+	}{
+		{"check", func() []string { return runner.buildCheckCmdContext(context.Background()).Args }, []string{"restic", "check"}},
+		{"repair_index", func() []string { return runner.buildRepairIndexCmdContext(context.Background()).Args }, []string{"restic", "repair", "index"}},
+		{"repair_snapshots", func() []string { return runner.buildRepairSnapshotsCmdContext(context.Background()).Args }, []string{"restic", "repair", "snapshots", "--forget"}},
+		{"prune", func() []string { return runner.buildPruneCmdContext(context.Background()).Args }, []string{"restic", "prune"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			want := append(append([]string{}, tc.head...), base...)
+			assertArgsEqual(t, tc.cmd(), want)
+		})
+	}
+}
+
+func TestRunMaintenanceCheckReturnsOutput(t *testing.T) {
+	dir := t.TempDir()
+	writeFakeResticRouter(t, dir, map[string]fakeResticScript{
+		"check": {Stdout: "no errors were found\n"},
+	})
+	prependPath(t, dir)
+	pwFile := writeTempPasswordFile(t, "secret")
+	runner := ResticRunner{RcloneConfPath: "/tmp/rclone.conf", PasswordFile: pwFile, RepoPath: "repo"}
+
+	out, err := runner.RunMaintenance(context.Background(), OpCheck)
+	if err != nil {
+		t.Fatalf("RunMaintenance(check) err = %v", err)
+	}
+	if !strings.Contains(out, "no errors were found") {
+		t.Fatalf("output = %q, want check result text", out)
+	}
+}
+
+func TestRunMaintenanceUnknownOpErrors(t *testing.T) {
+	pwFile := writeTempPasswordFile(t, "secret")
+	runner := ResticRunner{RcloneConfPath: "/tmp/rclone.conf", PasswordFile: pwFile, RepoPath: "repo"}
+	if _, err := runner.RunMaintenance(context.Background(), MaintenanceOp("bogus")); err == nil {
+		t.Fatal("RunMaintenance(bogus) err = nil, want error")
+	}
+}

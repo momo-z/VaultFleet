@@ -19,6 +19,18 @@ describe("http client", () => {
     await expect(apiGet("/api/test")).rejects.toMatchObject({ name: "ApiError", message: "invalid event" });
   });
 
+  it("includes safe error details in thrown messages", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      error: "send notification failed",
+      detail: "connect smtp server: connection refused",
+    }), { status: 502 })));
+
+    await expect(apiGet("/api/test")).rejects.toMatchObject({
+      name: "ApiError",
+      message: "send notification failed: connect smtp server: connection refused",
+    });
+  });
+
   it("sends same-origin credentials", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true, data: {} }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);

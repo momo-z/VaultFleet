@@ -32,6 +32,7 @@ const (
 	TypeUpdateAgent         = "update_agent"
 	TypeBackupProgress      = "backup_progress"
 	TypeCancelTask          = "cancel_task"
+	TypeMaintenance         = "maintenance"
 )
 
 const (
@@ -117,6 +118,7 @@ type TaskResultPayload struct {
 	DurationMs int64          `json:"duration_ms"`
 	RepoSize   int64          `json:"repo_size"`
 	ErrorLog   string         `json:"error_log,omitempty"`
+	Output     string         `json:"output,omitempty"`
 	StartedAt  time.Time      `json:"started_at"`
 	FinishedAt time.Time      `json:"finished_at"`
 	Snapshots  []SnapshotInfo `json:"snapshots,omitempty"`
@@ -186,6 +188,7 @@ type PolicyPushPayload struct {
 	AgentID         string          `json:"agent_id"`
 	Storage         StorageConfig   `json:"storage"`
 	ResticPassword  string          `json:"restic_password"`
+	PlainBackup     bool            `json:"plain_backup,omitempty"`
 	BackupDirs      []string        `json:"backup_dirs"`
 	ExcludePatterns []string        `json:"exclude_patterns"`
 	Schedule        string          `json:"schedule"`
@@ -212,6 +215,12 @@ type RetentionPolicy struct {
 // BackupNowPayload requests an immediate backup run for an agent.
 type BackupNowPayload struct {
 	AgentID string `json:"agent_id"`
+}
+
+// MaintenancePayload requests a repository maintenance operation on an agent.
+type MaintenancePayload struct {
+	AgentID   string `json:"agent_id"`
+	Operation string `json:"operation"`
 }
 
 // RestoreReqPayload requests a snapshot restore to a target path.

@@ -54,11 +54,13 @@ type notificationResponse struct {
 
 func RegisterNotificationRoutes(rg *gin.RouterGroup, h *NotificationHandler) {
 	rg.POST("/notifications", h.Create)
+	rg.POST("/notifications/test", h.TestUnsaved)
 	rg.GET("/notifications", h.List)
 	rg.GET("/notifications/:id", h.Get)
 	rg.PUT("/notifications/:id", h.Update)
 	rg.DELETE("/notifications/:id", h.Delete)
 	rg.POST("/notifications/:id/test", h.TestSend)
+	rg.POST("/notifications/:id/test-config", h.TestDraft)
 }
 
 func (h *NotificationHandler) Create(c *gin.Context) {
@@ -213,38 +215,125 @@ func (h *NotificationHandler) TestSend(c *gin.Context) {
 		return
 	}
 
-	factory := h.notifierFactory
-	if factory == nil {
-		factory = notify.NewNotifierFromConfig
-	}
 	configJSON, ok := h.decryptNotificationConfigForRequest(c, config.Config)
 	if !ok {
 		return
 	}
 
-	notifier, err := factory(config.Type, json.RawMessage(configJSON))
+	notifier, err := h.newNotifier(config.Type, json.RawMessage(configJSON))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid notification config"})
 		return
 	}
 
-	msg := notify.NotifyMessage{
+	h.sendTestNotification(c, notifier)
+}
+
+func (h *NotificationHandler) TestUnsaved(c *gin.Context) {
+	var request notificationRequest
+	if err := bindStrictJSON(c, &request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+
+	configJSON, ok := marshalNotificationConfig(c, request.Config)
+	if !ok {
+		return
+	}
+	if ok := validateNotificationConfig(c, request.Type, json.RawMessage(configJSON)); !ok {
+		return
+	}
+
+	notifier, err := h.newNotifier(request.Type, json.RawMessage(configJSON))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid notification config"})
+		return
+	}
+
+	h.sendTestNotification(c, notifier)
+}
+
+func (h *NotificationHandler) TestDraft(c *gin.Context) {
+	config, ok := h.findNotificationByID(c, c.Param("id"))
+	if !ok {
+		return
+	}
+
+	var request updateNotificationRequest
+	if err := bindStrictJSON(c, &request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		return
+	}
+
+	nextType := config.Type
+	if request.Type != nil {
+		nextType = *request.Type
+	}
+
+	currentConfig, ok := h.decryptNotificationConfigForRequest(c, config.Config)
+	if !ok {
+		return
+	}
+
+	nextConfig := currentConfig
+	if request.Config != nil {
+		mergedConfig, err := preserveNotificationRedactedSecrets(config.Type, currentConfig, request.Config)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "decode notification config"})
+			return
+		}
+		configJSON, ok := marshalNotificationConfig(c, request.Config)
+		if mergedConfig != nil {
+			configJSON, ok = marshalNotificationConfig(c, mergedConfig)
+		}
+		if !ok {
+			return
+		}
+		nextConfig = configJSON
+	}
+
+	if ok := validateNotificationConfig(c, nextType, json.RawMessage(nextConfig)); !ok {
+		return
+	}
+
+	notifier, err := h.newNotifier(nextType, json.RawMessage(nextConfig))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid notification config"})
+		return
+	}
+
+	h.sendTestNotification(c, notifier)
+}
+
+func (h *NotificationHandler) sendTestNotification(c *gin.Context, notifier notify.Notifier) {
+	if err := notifier.Send(c.Request.Context(), testNotifyMessage()); err != nil {
+		if errors.Is(err, context.Canceled) {
+			c.JSON(http.StatusGatewayTimeout, gin.H{"error": "request cancelled"})
+			return
+		}
+		c.JSON(http.StatusBadGateway, gin.H{"error": "send notification failed", "detail": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+func (h *NotificationHandler) newNotifier(notificationType string, raw json.RawMessage) (notify.Notifier, error) {
+	factory := h.notifierFactory
+	if factory == nil {
+		factory = notify.NewNotifierFromConfig
+	}
+	return factory(notificationType, raw)
+}
+
+func testNotifyMessage() notify.NotifyMessage {
+	return notify.NotifyMessage{
 		Title:     "Test Notification",
 		Body:      "VaultFleet notification test message.",
 		Level:     notify.LevelInfo,
 		AgentName: "VaultFleet",
 		Timestamp: time.Now().UTC(),
 	}
-	if err := notifier.Send(c.Request.Context(), msg); err != nil {
-		if errors.Is(err, context.Canceled) {
-			c.JSON(http.StatusGatewayTimeout, gin.H{"error": "request cancelled"})
-			return
-		}
-		c.JSON(http.StatusBadGateway, gin.H{"error": "send notification failed"})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 func (h *NotificationHandler) findNotificationByID(c *gin.Context, id string) (db.NotificationConfig, bool) {
@@ -344,6 +433,8 @@ func notificationName(name string, notificationType string) string {
 		return "Telegram"
 	case "webhook":
 		return "Webhook"
+	case "email":
+		return "Email"
 	default:
 		return notificationType
 	}
@@ -463,6 +554,10 @@ func redactNotificationConfig(notificationType string, config map[string]any) ma
 				headers[key] = redactedSecretValue
 			}
 		}
+	case "email":
+		if _, ok := redacted["smtp_password"]; ok {
+			redacted["smtp_password"] = redactedSecretValue
+		}
 	}
 	return redacted
 }
@@ -498,6 +593,12 @@ func preserveNotificationRedactedSecrets(notificationType string, currentJSON st
 				if currentValue, ok := currentHeaders[key]; ok {
 					nextHeaders[key] = currentValue
 				}
+			}
+		}
+	case "email":
+		if merged["smtp_password"] == redactedSecretValue {
+			if currentValue, ok := currentConfig["smtp_password"]; ok {
+				merged["smtp_password"] = currentValue
 			}
 		}
 	}

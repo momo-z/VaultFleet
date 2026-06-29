@@ -21,6 +21,7 @@ import (
 const (
 	maxSnapshotBrowseResponseBytes = 900 * 1024
 	backupProgressThrottleInterval = 5 * time.Second
+	periodicCheckSchedule          = "0 5 * * *"
 )
 
 type SendFunc func(protocol.Message) error
@@ -38,6 +39,7 @@ type BackupRunnerWithProgressFunc func(context.Context, executor.ExecutorConfig,
 type RestoreRunnerFunc func(context.Context, executor.ExecutorConfig, string, string, []string) error
 type SnapshotListRunnerFunc func(context.Context, executor.ExecutorConfig) ([]executor.SnapshotInfo, error)
 type SnapshotBrowseRunnerFunc func(context.Context, executor.ExecutorConfig, string, string) ([]executor.SnapshotFileEntry, error)
+type MaintenanceRunnerFunc func(context.Context, executor.ExecutorConfig, executor.MaintenanceOp) executor.TaskResult
 
 type policyScheduler interface {
 	Validate(schedule string) error
@@ -58,6 +60,7 @@ type HandlerConfig struct {
 	RestoreRunner            RestoreRunnerFunc
 	SnapshotListRunner       SnapshotListRunnerFunc
 	SnapshotBrowseRunner     SnapshotBrowseRunnerFunc
+	MaintenanceRunner        MaintenanceRunnerFunc
 	DirSizeFunc              DirSizeFunc
 	AgentVersion             string
 	Updater                  AgentUpdater
@@ -76,6 +79,7 @@ type Handler struct {
 	restoreRunner            RestoreRunnerFunc
 	snapshotListRunner       SnapshotListRunnerFunc
 	snapshotBrowseRunner     SnapshotBrowseRunnerFunc
+	maintenanceRunner        MaintenanceRunnerFunc
 	snapshotCache            *snapshotCache
 	dirSizeFunc              DirSizeFunc
 	agentVersion             string
@@ -119,6 +123,10 @@ func NewHandler(config HandlerConfig) *Handler {
 	if snapshotBrowseRunner == nil {
 		snapshotBrowseRunner = runSnapshotBrowse
 	}
+	maintenanceRunner := config.MaintenanceRunner
+	if maintenanceRunner == nil {
+		maintenanceRunner = runMaintenance
+	}
 	dirSizeFunc := config.DirSizeFunc
 	if dirSizeFunc == nil {
 		dirSizeFunc = filebrowse.CalculateDirSize
@@ -144,6 +152,7 @@ func NewHandler(config HandlerConfig) *Handler {
 		restoreRunner:            restoreRunner,
 		snapshotListRunner:       snapshotListRunner,
 		snapshotBrowseRunner:     snapshotBrowseRunner,
+		maintenanceRunner:        maintenanceRunner,
 		snapshotCache:            newSnapshotCache(configDir),
 		dirSizeFunc:              dirSizeFunc,
 		agentVersion:             config.AgentVersion,
@@ -160,6 +169,8 @@ func (h *Handler) Handle(msg protocol.Message) {
 		h.handlePolicyPush(msg)
 	case protocol.TypeBackupNow:
 		h.handleBackupNow(msg)
+	case protocol.TypeMaintenance:
+		h.handleMaintenance(msg)
 	case protocol.TypeDirBrowseReq:
 		h.handleDirBrowseReq(msg)
 	case protocol.TypeDirSizeReq:
@@ -194,6 +205,7 @@ func (h *Handler) restoreSavedPolicySchedule() {
 	}
 	if savedPolicy.Schedule == "" {
 		h.scheduler.RemoveJob(savedPolicy.AgentID)
+		h.scheduler.RemoveJob(checkJobKey(savedPolicy.AgentID))
 		return
 	}
 	if err := h.scheduler.UpdateSchedule(savedPolicy.AgentID, savedPolicy.Schedule, func() {
@@ -206,6 +218,45 @@ func (h *Handler) restoreSavedPolicySchedule() {
 	}); err != nil {
 		log.Printf("restore saved policy schedule failed: %v", err)
 	}
+	h.updatePeriodicCheckSchedule(savedPolicy.AgentID, savedPolicy)
+}
+
+func checkJobKey(agentID string) string {
+	return agentID + ":check"
+}
+
+func (h *Handler) updatePeriodicCheckSchedule(agentID string, policyPayload *protocol.PolicyPushPayload) {
+	if h.scheduler == nil {
+		return
+	}
+	if err := h.scheduler.UpdateSchedule(checkJobKey(agentID), periodicCheckSchedule, func() {
+		startErr := h.tasks.Start("", taskTypeBackup, func(ctx context.Context) {
+			h.runCheckForPolicy(ctx, agentID, policyPayload)
+		})
+		if startErr != nil {
+			log.Printf("scheduled check skipped: %v", startErr)
+		}
+	}); err != nil {
+		log.Printf("update periodic check schedule failed: %v", err)
+	}
+}
+
+func (h *Handler) runCheckForPolicy(ctx context.Context, agentID string, policyPayload *protocol.PolicyPushPayload) {
+	if policyPayload == nil {
+		return
+	}
+	if agentID == "" {
+		agentID = policyPayload.AgentID
+	}
+	startedAt := time.Now()
+	if err := h.ensureRcloneConf(policyPayload); err != nil {
+		log.Printf("prepare rclone config failed: %v", err)
+		h.sendTaskResult(h.failedTypedTaskResult(agentID, "maintenance", "", "prepare rclone config: "+err.Error(), startedAt))
+		return
+	}
+	cfg := executorConfigForPolicy(h.configDir, policyPayload)
+	result := h.maintenanceRunner(ctx, cfg, executor.OpCheck)
+	h.sendTaskResult(result.ToProtocol(agentID, startedAt))
 }
 
 func (h *Handler) handlePolicyPush(msg protocol.Message) {
@@ -275,6 +326,7 @@ func (h *Handler) handlePolicyPush(msg protocol.Message) {
 			h.sendPolicyAck(msg.ID, pushedPolicy.AgentID, false, err.Error())
 			return
 		}
+		h.updatePeriodicCheckSchedule(pushedPolicy.AgentID, pushedPolicy)
 	}
 	h.sendPolicyAck(msg.ID, pushedPolicy.AgentID, true, "")
 }
@@ -341,12 +393,18 @@ func (h *Handler) stagePolicyFiles(pushedPolicy *protocol.PolicyPushPayload) (*s
 		return nil, err
 	}
 
+	if pushedPolicy.PlainBackup {
+		staged.passwordPath = filepath.Join(h.configDir, ".restic-password")
+		return staged, nil
+	}
+
 	passwordPath, err := writeSecureTempFile(h.configDir, ".restic-password.*", []byte(pushedPolicy.ResticPassword))
 	if err != nil {
 		staged.cleanup()
 		return nil, err
 	}
 	staged.passwordPath = passwordPath
+
 	return staged, nil
 }
 
@@ -390,6 +448,13 @@ func (s *stagedPolicyFiles) commit(configDir string) error {
 		return err
 	}
 	s.rclonePath = ""
+	if s.passwordPath == passwordTarget {
+		if err := os.Remove(passwordTarget); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		s.passwordPath = ""
+		return nil
+	}
 	if err := os.Rename(s.passwordPath, passwordTarget); err != nil {
 		return err
 	}
@@ -555,6 +620,63 @@ func (h *Handler) handleBackupNow(msg protocol.Message) {
 	})
 	if startErr != nil {
 		h.sendTaskResultWithID(msg.ID, h.failedTaskResult(agentID, startErr.Error(), time.Now()))
+	}
+}
+
+func isValidMaintenanceOp(op string) bool {
+	switch executor.MaintenanceOp(op) {
+	case executor.OpUnlock, executor.OpCheck, executor.OpRepairIndex, executor.OpRepairSnapshots, executor.OpPrune:
+		return true
+	default:
+		return false
+	}
+}
+
+func (h *Handler) handleMaintenance(msg protocol.Message) {
+	payload, err := protocol.ParsePayload[protocol.MaintenancePayload](&msg)
+	if err != nil {
+		log.Printf("parse maintenance failed: %v", err)
+		h.sendTaskResultWithID(msg.ID, h.failedTypedTaskResult(h.agentID, "maintenance", "", "parse maintenance: "+err.Error(), time.Now()))
+		return
+	}
+
+	agentID := payload.AgentID
+	if agentID == "" {
+		agentID = h.agentID
+	}
+	if !isValidMaintenanceOp(payload.Operation) {
+		h.sendTaskResultWithID(msg.ID, h.failedTypedTaskResult(agentID, "maintenance", "", "invalid maintenance operation: "+payload.Operation, time.Now()))
+		return
+	}
+	if h.policyStore == nil {
+		h.sendTaskResultWithID(msg.ID, h.failedTypedTaskResult(agentID, "maintenance", "", "policy store not configured", time.Now()))
+		return
+	}
+
+	policyPayload, err := h.policyStore.LoadPolicy()
+	if err != nil {
+		log.Printf("load policy failed: %v", err)
+		h.sendTaskResultWithID(msg.ID, h.failedTypedTaskResult(agentID, "maintenance", "", "load policy: "+err.Error(), time.Now()))
+		return
+	}
+	if agentID == "" {
+		agentID = policyPayload.AgentID
+	}
+
+	op := executor.MaintenanceOp(payload.Operation)
+	startErr := h.tasks.Start(msg.ID, taskTypeBackup, func(ctx context.Context) {
+		startedAt := time.Now()
+		if err := h.ensureRcloneConf(policyPayload); err != nil {
+			log.Printf("prepare rclone config failed: %v", err)
+			h.sendTaskResultWithID(msg.ID, h.failedTypedTaskResult(agentID, "maintenance", "", "prepare rclone config: "+err.Error(), startedAt))
+			return
+		}
+		cfg := executorConfigForPolicy(h.configDir, policyPayload)
+		result := h.maintenanceRunner(ctx, cfg, op)
+		h.sendTaskResultWithID(msg.ID, result.ToProtocol(agentID, startedAt))
+	})
+	if startErr != nil {
+		h.sendTaskResultWithID(msg.ID, h.failedTypedTaskResult(agentID, "maintenance", "", startErr.Error(), time.Now()))
 	}
 }
 
@@ -814,12 +936,13 @@ func toExecutorRetention(retention protocol.RetentionPolicy) executor.RetentionP
 
 func executorConfigForPolicy(configDir string, policyPayload *protocol.PolicyPushPayload) executor.ExecutorConfig {
 	return executor.ExecutorConfig{
-		ConfigDir:  configDir,
-		RepoPath:   policyPayload.Storage.RepoPath,
-		BackupDirs: append([]string(nil), policyPayload.BackupDirs...),
-		Excludes:   append([]string(nil), policyPayload.ExcludePatterns...),
-		Retention:  toExecutorRetention(policyPayload.Retention),
-		RcloneArgs: copyStringMap(policyPayload.Storage.RcloneArgs),
+		ConfigDir:   configDir,
+		RepoPath:    policyPayload.Storage.RepoPath,
+		BackupDirs:  append([]string(nil), policyPayload.BackupDirs...),
+		Excludes:    append([]string(nil), policyPayload.ExcludePatterns...),
+		Retention:   toExecutorRetention(policyPayload.Retention),
+		RcloneArgs:  copyStringMap(policyPayload.Storage.RcloneArgs),
+		PlainBackup: policyPayload.PlainBackup,
 	}
 }
 
@@ -859,10 +982,24 @@ func runBackupWithProgress(ctx context.Context, cfg executor.ExecutorConfig, pro
 	return executor.NewExecutor(cfg).RunBackupJobWithProgress(ctx, progressFn)
 }
 
+func runMaintenance(ctx context.Context, cfg executor.ExecutorConfig, op executor.MaintenanceOp) executor.TaskResult {
+	return executor.NewExecutor(cfg).RunMaintenanceJob(ctx, op)
+}
+
 func runRestore(ctx context.Context, cfg executor.ExecutorConfig, snapshotID string, target string, includePaths []string) error {
+	passwordFile := filepath.Join(cfg.ConfigDir, ".restic-password")
+	usePlain := cfg.PlainBackup || !executor.HasPasswordFile(passwordFile)
+	if usePlain {
+		runner := executor.PlainRunner{
+			RcloneConfPath:  filepath.Join(cfg.ConfigDir, "rclone.conf"),
+			RepoPath:        cfg.RepoPath,
+			RcloneExtraArgs: copyStringMap(cfg.RcloneArgs),
+		}
+		return runner.RestoreSnapshot(ctx, snapshotID, target, includePaths)
+	}
 	runner := executor.ResticRunner{
 		RcloneConfPath:  filepath.Join(cfg.ConfigDir, "rclone.conf"),
-		PasswordFile:    filepath.Join(cfg.ConfigDir, ".restic-password"),
+		PasswordFile:    passwordFile,
 		RepoPath:        cfg.RepoPath,
 		RcloneExtraArgs: copyStringMap(cfg.RcloneArgs),
 	}
@@ -870,9 +1007,18 @@ func runRestore(ctx context.Context, cfg executor.ExecutorConfig, snapshotID str
 }
 
 func runSnapshotList(ctx context.Context, cfg executor.ExecutorConfig) ([]executor.SnapshotInfo, error) {
+	passwordFile := filepath.Join(cfg.ConfigDir, ".restic-password")
+	if !executor.HasPasswordFile(passwordFile) {
+		runner := executor.PlainRunner{
+			RcloneConfPath:  filepath.Join(cfg.ConfigDir, "rclone.conf"),
+			RepoPath:        cfg.RepoPath,
+			RcloneExtraArgs: copyStringMap(cfg.RcloneArgs),
+		}
+		return runner.ListSnapshots(ctx)
+	}
 	runner := executor.ResticRunner{
 		RcloneConfPath:  filepath.Join(cfg.ConfigDir, "rclone.conf"),
-		PasswordFile:    filepath.Join(cfg.ConfigDir, ".restic-password"),
+		PasswordFile:    passwordFile,
 		RepoPath:        cfg.RepoPath,
 		RcloneExtraArgs: copyStringMap(cfg.RcloneArgs),
 	}
@@ -880,9 +1026,18 @@ func runSnapshotList(ctx context.Context, cfg executor.ExecutorConfig) ([]execut
 }
 
 func runSnapshotBrowse(ctx context.Context, cfg executor.ExecutorConfig, snapshotID string, path string) ([]executor.SnapshotFileEntry, error) {
+	passwordFile := filepath.Join(cfg.ConfigDir, ".restic-password")
+	if !executor.HasPasswordFile(passwordFile) {
+		runner := executor.PlainRunner{
+			RcloneConfPath:  filepath.Join(cfg.ConfigDir, "rclone.conf"),
+			RepoPath:        cfg.RepoPath,
+			RcloneExtraArgs: copyStringMap(cfg.RcloneArgs),
+		}
+		return runner.LsSnapshot(ctx, snapshotID, path)
+	}
 	runner := executor.ResticRunner{
 		RcloneConfPath:  filepath.Join(cfg.ConfigDir, "rclone.conf"),
-		PasswordFile:    filepath.Join(cfg.ConfigDir, ".restic-password"),
+		PasswordFile:    passwordFile,
 		RepoPath:        cfg.RepoPath,
 		RcloneExtraArgs: copyStringMap(cfg.RcloneArgs),
 	}

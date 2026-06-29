@@ -136,7 +136,10 @@ func (d *Dispatcher) notificationForEvent(event events.Event) (NotifyMessage, st
 			Timestamp: d.now().UTC(),
 		}, EventAgentOffline, true
 	case events.TaskResult:
-		return d.backupFailedMessage(event.Payload)
+		if msg, eventName, ok := d.backupFailedMessage(event.Payload); ok {
+			return msg, eventName, true
+		}
+		return d.maintenanceCheckFailedMessage(event.Payload)
 	case events.EventType(EventBackupFailed):
 		return d.directBackupFailedMessage(event.Payload)
 	default:
@@ -200,6 +203,68 @@ func (d *Dispatcher) backupFailedMessage(payload any) (NotifyMessage, string, bo
 	}, EventBackupFailed, true
 }
 
+var corruptionMarkers = []string{
+	"repository contains errors",
+	"is not known",
+	"not found in repository",
+	"repository is damaged",
+}
+
+func containsCorruptionMarker(text string) bool {
+	lower := strings.ToLower(text)
+	for _, marker := range corruptionMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func (d *Dispatcher) maintenanceCheckFailedMessage(payload any) (NotifyMessage, string, bool) {
+	result, fallbackAgentID, ok := parseTaskResultPayload(payload)
+	if !ok {
+		return NotifyMessage{}, "", false
+	}
+	if result.TaskType != "maintenance" {
+		return NotifyMessage{}, "", false
+	}
+	if !isFailureStatus(result.Status) &&
+		!containsCorruptionMarker(result.Output) &&
+		!containsCorruptionMarker(result.ErrorLog) {
+		return NotifyMessage{}, "", false
+	}
+
+	agentName := d.displayAgentName(result.AgentID)
+	if agentName == "" {
+		agentName = d.displayAgentName(fallbackAgentID)
+	}
+	if agentName == "" {
+		agentName = "unknown"
+	}
+
+	snippet := result.Output
+	if snippet == "" {
+		snippet = result.ErrorLog
+	}
+	body := fmt.Sprintf("Repository corruption detected on agent %s.", agentName)
+	if snippet != "" {
+		body = fmt.Sprintf("%s\n%s", body, snippet)
+	}
+
+	timestamp := result.FinishedAt
+	if timestamp.IsZero() {
+		timestamp = d.now().UTC()
+	}
+
+	return NotifyMessage{
+		Title:     "Repository Corruption Detected",
+		Body:      body,
+		Level:     LevelError,
+		AgentName: agentName,
+		Timestamp: timestamp.UTC(),
+	}, EventBackupFailed, true
+}
+
 func (d *Dispatcher) displayAgentName(agentIDOrName string) string {
 	if strings.TrimSpace(agentIDOrName) == "" {
 		return ""
@@ -249,6 +314,15 @@ func NewNotifierFromConfig(notificationType string, raw json.RawMessage) (Notifi
 			return nil, err
 		}
 		return NewWebhookNotifier(config), nil
+	case "email":
+		var config EmailConfig
+		if err := decodeStrictJSON(raw, &config); err != nil {
+			return nil, fmt.Errorf("decode email config: %w", err)
+		}
+		if err := ValidateEmailConfig(config); err != nil {
+			return nil, err
+		}
+		return NewEmailNotifier(config), nil
 	default:
 		return nil, fmt.Errorf("unknown notification type %q", notificationType)
 	}

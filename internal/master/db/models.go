@@ -122,6 +122,7 @@ type TaskHistory struct {
 	DurationMs int64      `json:"duration_ms"`
 	RepoSize   int64      `json:"repo_size"`
 	ErrorLog   string     `gorm:"type:text" json:"error_log"`
+	Output     string     `gorm:"type:text" json:"output"`
 	CreatedAt  time.Time  `json:"created_at"`
 	UpdatedAt  time.Time  `json:"updated_at"`
 }
