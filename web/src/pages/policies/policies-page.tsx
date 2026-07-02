@@ -372,7 +372,7 @@ export function PoliciesPage() {
                       type="password"
                       value={formData.restic_password}
                       onChange={(e) => setFormData({ ...formData, restic_password: e.target.value })}
-                      placeholder="留空则不加密"
+                      placeholder="留空则不加密，仍使用 restic 保留历史版本"
                     />
                   </div>
                 )}

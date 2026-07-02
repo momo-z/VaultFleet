@@ -229,6 +229,13 @@ func (h *Handler) updatePeriodicCheckSchedule(agentID string, policyPayload *pro
 	if h.scheduler == nil {
 		return
 	}
+	if policyPayload != nil && policyPayload.PlainBackup {
+		// Plain backups have no restic repository; check is not applicable.
+		// Remove any previously registered check job and skip registration.
+		h.scheduler.RemoveJob(checkJobKey(agentID))
+		log.Printf("periodic check skipped for plain backup node %s", agentID)
+		return
+	}
 	if err := h.scheduler.UpdateSchedule(checkJobKey(agentID), periodicCheckSchedule, func() {
 		startErr := h.tasks.Start("", taskTypeBackup, func(ctx context.Context) {
 			h.runCheckForPolicy(ctx, agentID, policyPayload)
@@ -988,7 +995,7 @@ func runMaintenance(ctx context.Context, cfg executor.ExecutorConfig, op executo
 
 func runRestore(ctx context.Context, cfg executor.ExecutorConfig, snapshotID string, target string, includePaths []string) error {
 	passwordFile := filepath.Join(cfg.ConfigDir, ".restic-password")
-	usePlain := cfg.PlainBackup || !executor.HasPasswordFile(passwordFile)
+	usePlain := cfg.PlainBackup
 	if usePlain {
 		runner := executor.PlainRunner{
 			RcloneConfPath:  filepath.Join(cfg.ConfigDir, "rclone.conf"),

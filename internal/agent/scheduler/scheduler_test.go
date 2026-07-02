@@ -25,6 +25,18 @@ func TestSchedulerAddJobRunsEverySchedule(t *testing.T) {
 	}, 1500*time.Millisecond, 25*time.Millisecond)
 }
 
+func TestSchedulerHasJobReflectsRegistration(t *testing.T) {
+	s := New()
+
+	assert.False(t, s.HasJob("agent-1"), "no job registered yet")
+
+	require.NoError(t, s.AddJob("agent-1", "@every 1h", func() {}))
+	assert.True(t, s.HasJob("agent-1"), "job should exist after AddJob")
+
+	s.RemoveJob("agent-1")
+	assert.False(t, s.HasJob("agent-1"), "job should be gone after RemoveJob")
+}
+
 func TestSchedulerRemoveJobStopsFutureRuns(t *testing.T) {
 	s := New()
 	require.NoError(t, s.Start())

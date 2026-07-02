@@ -389,7 +389,7 @@ func policyPushPayload(database *db.Database, policy db.BackupPolicy, storage db
 			RclonePassObscured: rclonePassObscured,
 		},
 		ResticPassword:  resticPassword,
-		PlainBackup:     strings.TrimSpace(resticPassword) == "",
+		PlainBackup:     false,
 		BackupDirs:      backupDirs,
 		ExcludePatterns: excludePatterns,
 		Schedule:        policy.Schedule,

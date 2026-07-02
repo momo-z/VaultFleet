@@ -2443,6 +2443,48 @@ func TestHandlerDirSizeReqSendsErrorPayload(t *testing.T) {
 	assert.Equal(t, int64(0), payload.Size)
 }
 
+func TestUpdatePeriodicCheckScheduleSkipsPlainNode(t *testing.T) {
+	sched := agentscheduler.New()
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: policy.NewStore(t.TempDir()),
+		ConfigDir:   t.TempDir(),
+		Scheduler:   sched,
+	})
+
+	payload := &protocol.PolicyPushPayload{
+		AgentID:     "agent-plain",
+		PlainBackup: true,
+		Schedule:    "0 2 * * *",
+	}
+
+	handler.updatePeriodicCheckSchedule(payload.AgentID, payload)
+
+	if sched.HasJob(checkJobKey(payload.AgentID)) {
+		t.Fatal("plain node must NOT have a periodic check job registered")
+	}
+}
+
+func TestUpdatePeriodicCheckScheduleRegistersForResticNode(t *testing.T) {
+	sched := agentscheduler.New()
+	handler := NewHandler(HandlerConfig{
+		PolicyStore: policy.NewStore(t.TempDir()),
+		ConfigDir:   t.TempDir(),
+		Scheduler:   sched,
+	})
+
+	payload := &protocol.PolicyPushPayload{
+		AgentID:     "agent-restic",
+		PlainBackup: false,
+		Schedule:    "0 2 * * *",
+	}
+
+	handler.updatePeriodicCheckSchedule(payload.AgentID, payload)
+
+	if !sched.HasJob(checkJobKey(payload.AgentID)) {
+		t.Fatal("restic node must have a periodic check job registered")
+	}
+}
+
 type scheduledUpdate struct {
 	agentID  string
 	schedule string

@@ -94,7 +94,7 @@ func TestNewExecutorPassesRcloneArgsToRunner(t *testing.T) {
 	}
 }
 
-func TestNewExecutorUsesPlainRunnerWhenNoPasswordFile(t *testing.T) {
+func TestNewExecutorUsesResticRunnerWhenNoPasswordFile(t *testing.T) {
 	cfg := ExecutorConfig{
 		ConfigDir:  t.TempDir(),
 		RepoPath:   "repo/agent-1",
@@ -106,16 +106,16 @@ func TestNewExecutorUsesPlainRunnerWhenNoPasswordFile(t *testing.T) {
 	if executor.restic == nil {
 		t.Fatal("NewExecutor() runner is nil")
 	}
-	runner, ok := executor.restic.(PlainRunner)
+	runner, ok := executor.restic.(ResticRunner)
 	if !ok {
-		t.Fatalf("NewExecutor() runner type = %T, want PlainRunner", executor.restic)
+		t.Fatalf("NewExecutor() runner type = %T, want ResticRunner (no password → no-password restic)", executor.restic)
 	}
 	if runner.RepoPath != cfg.RepoPath {
 		t.Fatalf("RepoPath = %q, want %q", runner.RepoPath, cfg.RepoPath)
 	}
 }
 
-func TestNewExecutorUsesPlainRunnerWhenPasswordFileIsEmpty(t *testing.T) {
+func TestNewExecutorUsesResticRunnerWhenPasswordFileIsEmpty(t *testing.T) {
 	cfgDir := t.TempDir()
 	os.WriteFile(filepath.Join(cfgDir, ".restic-password"), []byte("  \n  "), 0o600)
 
@@ -126,8 +126,22 @@ func TestNewExecutorUsesPlainRunnerWhenPasswordFileIsEmpty(t *testing.T) {
 
 	executor := NewExecutor(cfg)
 
+	if _, ok := executor.restic.(ResticRunner); !ok {
+		t.Fatalf("NewExecutor() runner type = %T, want ResticRunner (empty password → no-password restic)", executor.restic)
+	}
+}
+
+func TestNewExecutorUsesPlainRunnerWhenPlainBackupExplicit(t *testing.T) {
+	cfg := ExecutorConfig{
+		ConfigDir:   t.TempDir(),
+		RepoPath:    "repo/agent-1",
+		PlainBackup: true,
+	}
+
+	executor := NewExecutor(cfg)
+
 	if _, ok := executor.restic.(PlainRunner); !ok {
-		t.Fatalf("NewExecutor() runner type = %T, want PlainRunner (empty password)", executor.restic)
+		t.Fatalf("NewExecutor() runner type = %T, want PlainRunner (explicit PlainBackup)", executor.restic)
 	}
 }
 
