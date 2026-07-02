@@ -102,9 +102,10 @@ func NewExecutor(cfg ExecutorConfig) *Executor {
 	passwordFile := filepath.Join(cfg.ConfigDir, ".restic-password")
 	rcloneArgs := copyStringMap(cfg.RcloneArgs)
 
-	// Use explicit PlainBackup flag from the policy if set.
-	// Otherwise fall back to checking the password file on disk.
-	usePlain := cfg.PlainBackup || !HasPasswordFile(passwordFile)
+	// Plain rclone backup is used only when explicitly requested via the
+	// policy's PlainBackup flag. An empty/missing password means no-password
+	// restic (ResticRunner with --insecure-no-password), not plain.
+	usePlain := cfg.PlainBackup
 
 	var runner resticExecutor
 	if usePlain {
