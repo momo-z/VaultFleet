@@ -1086,3 +1086,32 @@ func policyAckMessageWithID(t *testing.T, messageID string, payload protocol.Pol
 		Payload: raw,
 	}
 }
+
+func TestCurrentPolicyLookupEmptyPasswordDoesNotEnablePlainBackup(t *testing.T) {
+	database := newRouterAssemblyDatabase(t)
+	agent, storage := createRouterAssemblyPolicyFixtures(t, database)
+
+	// 空密码策略（模拟用户留空密码框）。
+	emptyPw, err := db.Encrypt("", database.MasterKey)
+	require.NoError(t, err)
+	policy := db.BackupPolicy{
+		AgentID:         agent.ID,
+		StorageID:       storage.ID,
+		RepoPath:        "vaultfleet/" + agent.ID,
+		ResticPassword:  emptyPw,
+		BackupDirs:      `["/etc"]`,
+		ExcludePatterns: `[]`,
+		Schedule:        "0 3 * * *",
+		Retention:       `{"keep_last":3}`,
+		Synced:          false,
+	}
+	require.NoError(t, database.DB.Create(&policy).Error)
+
+	msg, ok := CurrentPolicyLookup(database)(agent.ID)
+	require.True(t, ok)
+
+	payload, err := protocol.ParsePayload[protocol.PolicyPushPayload](msg)
+	require.NoError(t, err)
+	assert.False(t, payload.PlainBackup, "empty password must NOT enable plain backup")
+	assert.Empty(t, payload.ResticPassword)
+}
