@@ -59,6 +59,13 @@ func (s *Scheduler) RemoveJob(agentID string) {
 	delete(s.entryID, agentID)
 }
 
+func (s *Scheduler) HasJob(key string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.entryID[key]
+	return ok
+}
+
 func (s *Scheduler) UpdateSchedule(agentID string, schedule string, fn func()) error {
 	parsedSchedule, err := s.parse(schedule)
 	if err != nil {
