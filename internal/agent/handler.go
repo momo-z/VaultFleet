@@ -988,7 +988,7 @@ func runMaintenance(ctx context.Context, cfg executor.ExecutorConfig, op executo
 
 func runRestore(ctx context.Context, cfg executor.ExecutorConfig, snapshotID string, target string, includePaths []string) error {
 	passwordFile := filepath.Join(cfg.ConfigDir, ".restic-password")
-	usePlain := cfg.PlainBackup || !executor.HasPasswordFile(passwordFile)
+	usePlain := cfg.PlainBackup
 	if usePlain {
 		runner := executor.PlainRunner{
 			RcloneConfPath:  filepath.Join(cfg.ConfigDir, "rclone.conf"),
