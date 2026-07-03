@@ -285,7 +285,7 @@ func (s *Service) CompleteTaskResultWith(ctx context.Context, agentID string, me
 				"agent_id = ? AND message_id = ? AND type IN ? AND status NOT IN ?",
 				agentID,
 				messageID,
-				[]string{protocol.TypeBackupNow, protocol.TypeRestoreReq, protocol.TypeSelectiveRestoreReq},
+				[]string{protocol.TypeBackupNow, protocol.TypeRestoreReq, protocol.TypeSelectiveRestoreReq, protocol.TypeMaintenance},
 				terminalStatuses(),
 			).
 			First(&command).Error
@@ -911,6 +911,8 @@ func taskTypeForCommand(commandType string) (string, bool) {
 		return "backup", true
 	case protocol.TypeRestoreReq, protocol.TypeSelectiveRestoreReq:
 		return "restore", true
+	case protocol.TypeMaintenance:
+		return "maintenance", true
 	default:
 		return "", false
 	}

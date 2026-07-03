@@ -547,6 +547,47 @@ func TestCompleteTaskResultUpdatesCommandAndTaskHistory(t *testing.T) {
 	assert.True(t, history.FinishedAt.Equal(finishedAt))
 }
 
+func TestCompleteTaskResultUpdatesMaintenanceCommandAndTaskHistory(t *testing.T) {
+	database := setupCommandTestDB(t)
+	now := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
+	service := NewService(database, nil)
+	service.Now = func() time.Time { return now }
+	startedAt := time.Date(2026, 5, 20, 10, 0, 0, 0, time.UTC)
+	finishedAt := startedAt.Add(3 * time.Second)
+	msg, err := protocol.NewMessage(protocol.TypeMaintenance, protocol.MaintenancePayload{AgentID: "agent-1", Operation: "check"})
+	require.NoError(t, err)
+	command, err := service.CreateCommand(context.Background(), CreateCommandInput{
+		AgentID:   "agent-1",
+		Type:      protocol.TypeMaintenance,
+		Message:   *msg,
+		TaskType:  "maintenance",
+		TaskState: TaskStatusPending,
+	})
+	require.NoError(t, err)
+	require.NoError(t, database.DB.Model(&db.AgentCommand{}).Where("id = ?", command.ID).Update("status", CommandStatusDispatched).Error)
+
+	require.NoError(t, service.CompleteTaskResult(context.Background(), "agent-1", msg.ID, protocol.TaskResultPayload{
+		AgentID:    "agent-1",
+		TaskType:   "maintenance",
+		Status:     "success",
+		Output:     "no errors were found",
+		DurationMs: 3000,
+		StartedAt:  startedAt,
+		FinishedAt: finishedAt,
+	}))
+
+	var found db.AgentCommand
+	require.NoError(t, database.DB.First(&found, "id = ?", command.ID).Error)
+	assert.Equal(t, CommandStatusSucceeded, found.Status)
+	assert.Contains(t, found.Result, `"output":"no errors were found"`)
+
+	var history db.TaskHistory
+	require.NoError(t, database.DB.First(&history, "command_id = ?", command.ID).Error)
+	assert.Equal(t, TaskStatusSuccess, history.Status)
+	assert.Equal(t, "no errors were found", history.Output)
+	assert.Equal(t, int64(3000), history.DurationMs)
+}
+
 func TestCompleteTaskResultUpdatesOnlyMatchingCommandHistory(t *testing.T) {
 	database := setupCommandTestDB(t)
 	now := time.Date(2026, 5, 20, 12, 0, 0, 0, time.UTC)
